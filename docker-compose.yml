@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: ocr_api
+    ports:
+      - "8010:8010"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
+    volumes:
+      - .:/app
+    environment:
+      - APP_ENV=development
+      - REDIS_URL=redis://ocr_redis:6379/0
+      - MONGODB_URL=mongodb://ocr_mongo:27017
+      - POSTGRES_URL=postgresql+asyncpg://ocr_user:secret@ocr_postgres:5432/ocr_pipeline
+      - OLLAMA_BASE_URL=http://ocr_ollama:11434
+    depends_on:
+      - redis
+      - mongodb
+      - postgres
+      - ollama
+    networks:
+      - ocr_network
+      - shared-capstone-network
+
+  worker:
+    build: .
+    container_name: ocr_worker
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    volumes:
+      - .:/app
+    environment:
+      - APP_ENV=development
+      - REDIS_URL=redis://ocr_redis:6379/0
+      - MONGODB_URL=mongodb://ocr_mongo:27017
+      - POSTGRES_URL=postgresql+asyncpg://ocr_user:secret@ocr_postgres:5432/ocr_pipeline
+      - OLLAMA_BASE_URL=http://ocr_ollama:11434
+    depends_on:
+      - redis
+      - mongodb
+      - postgres
+      - ollama
+    networks:
+      - ocr_network
+      - shared-capstone-network
+
+  redis:
+    image: redis:alpine
+    container_name: ocr_redis
+    ports:
+      - "6380:6379"
+    networks:
+      - ocr_network
+
+  mongodb:
+    image: mongo:7
+    container_name: ocr_mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - ocr_mongo_data:/data/db
+    networks:
+      - ocr_network
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ocr_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=ocr_user
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=ocr_pipeline
+    volumes:
+      - ocr_postgres_data:/var/lib/postgresql/data
+    networks:
+      - ocr_network
+
+  ollama:
+    image: ollama/ollama
+    container_name: ocr_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ocr_ollama_data:/root/.ollama
+      - ./scripts/ollama-entrypoint.sh:/ollama-entrypoint.sh
+    entrypoint: ["/bin/bash", "/ollama-entrypoint.sh"]
+    networks:
+      - ocr_network
+
+networks:
+  ocr_network:
+    driver: bridge
+  shared-capstone-network:
+    external: true
+
+volumes:
+  ocr_mongo_data:
+  ocr_postgres_data:
+  ocr_ollama_data:

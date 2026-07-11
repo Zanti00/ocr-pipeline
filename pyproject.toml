@@ -1,0 +1,30 @@
+[project]
+name = "ocr-pipeline"
+version = "1.0.0"
+description = "AI OCR Pipeline for SERMS"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.1",
+    "celery>=5.4.0",
+    "redis>=5.0.4",
+    "motor>=3.4.0",
+    "sqlalchemy>=2.0.30",
+    "asyncpg>=0.29.0",
+    "pgvector>=0.3.0",
+    "sentence-transformers>=3.0.0",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.3.0",
+    "opencv-python-headless>=4.9.0",
+    "pdf2image>=1.17.0",
+    "httpx>=0.27.0",
+    "pydantic-settings>=2.2.1",
+    "alembic>=1.13.1"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.1",
+    "pytest-asyncio>=0.23.6",
+    "httpx>=0.27.0"
+]
