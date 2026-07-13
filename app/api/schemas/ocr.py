@@ -5,7 +5,7 @@ class OcrProcessRequest(BaseModel):
     receipt_id: int
     file_url: str
     callback_url: str
-    source_service: str
+    source_service: Optional[str] = None
 
 class OcrProcessResponse(BaseModel):
     job_id: str

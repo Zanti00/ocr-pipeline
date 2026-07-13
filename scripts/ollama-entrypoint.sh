@@ -5,7 +5,7 @@ pid=$!
 
 # Wait for Ollama to be ready
 echo "Waiting for Ollama to start..."
-while ! curl -s http://localhost:11434/api/tags > /dev/null; do
+while ! ollama list > /dev/null 2>&1; do
     sleep 1
 done
 
