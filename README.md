@@ -1,33 +1,226 @@
 # OCR Pipeline
 
-A standalone Python/FastAPI microservice that provides AI-powered receipt OCR extraction, expense categorization, BIR VAT classification, and pgvector-based duplicate detection.
+Standalone Python/FastAPI microservice for AI-powered receipt OCR: structured field extraction, expense categorization, BIR VAT classification, and pgvector-based duplicate detection.
 
-## Architecture
-- **FastAPI**: API layer serving webhook triggers
-- **Celery & Redis**: Asynchronous task processing queue
-- **MongoDB**: Storage for OCR results and job status tracking
-- **PostgreSQL & pgvector**: Vector embedding storage and similarity search
-- **Ollama**: Local LLM execution for structured data extraction (Qwen2.5 1.5B)
-- **Tesseract**: Traditional OCR for raw text extraction
-- **Sentence-Transformers**: Text embedding generation (`all-MiniLM-L6-v2`)
+**Consumers:** SERMS and PRS (service-to-service webhook integration)
 
-## Setup
+## Overview
 
-1. Copy environment variables:
+Upstream services submit a receipt image or PDF URL. The API queues an async Celery job, runs OCR + LLM extraction, stores results, and POSTs a callback when done.
+
+```
+Consumer (SERMS/PRS)
+        │
+        ▼
+   FastAPI API  ──queue──►  Celery Worker
+        │                        │
+        │                   Tesseract OCR
+        │                   Ollama (Qwen2.5 1.5B)
+        │                   Embeddings (MiniLM)
+        │                        │
+   MongoDB (jobs)          PostgreSQL + pgvector
+   Redis (broker)          Callback → Consumer
+```
+
+### Stack
+
+| Component | Role |
+|-----------|------|
+| **FastAPI** | HTTP API, auth, job enqueue |
+| **Celery + Redis** | Async receipt processing queue |
+| **MongoDB** | Job status, OCR results, extracted fields |
+| **PostgreSQL + pgvector** | Receipt text embeddings / similarity search |
+| **Ollama** | Local LLM for structured extraction (`qwen2.5:1.5b`) |
+| **Tesseract + OpenCV** | OCR + image preprocessing |
+| **Sentence-Transformers** | Embeddings (`all-MiniLM-L6-v2`) |
+
+## Prerequisites
+
+- Docker Desktop (Compose V2)
+- Git
+- External Docker network `shared-capstone-network` (shared with SERMS/PRS compose stacks)
+
+```bash
+docker network create shared-capstone-network
+```
+
+## Quick Start
+
+1. **Configure environment**
+
    ```bash
    cp .env.example .env
    ```
-2. Make sure you set your API keys for consumers (`SERMS_API_KEY`, `PRS_API_KEY`).
-3. Start the Docker composition:
+
+   Set consumer API keys (`SERMS_API_KEY`, `PRS_API_KEY`) and `CALLBACK_API_KEY` before exposing the service.
+
+2. **Start the stack**
+
    ```bash
-   docker compose up -d
+   docker compose up -d --build
    ```
 
+   First build downloads system OCR libs, PyTorch, and caches the embedding model. First Ollama start pulls `qwen2.5:1.5b` (can take several minutes).
+
+3. **Run Postgres migrations**
+
+   ```bash
+   docker compose exec api alembic upgrade head
+   ```
+
+4. **Verify**
+
+   ```bash
+   curl http://localhost:8010/api/health
+   ```
+
+### Services & ports
+
+| Service | Container | Host port |
+|---------|-----------|-----------|
+| API | `ocr_api` | `8010` |
+| Redis | `ocr_redis` | `6380` |
+| MongoDB | `ocr_mongo` | `27017` |
+| PostgreSQL | `ocr_postgres` | `5433` |
+| Ollama | `ocr_ollama` | `11434` |
+
+Worker: `ocr_worker` (no host port).
+
+### Useful commands
+
+```bash
+docker compose ps
+docker compose logs -f
+docker compose logs -f worker
+docker compose exec api pytest
+docker compose down          # keep volumes
+docker compose down -v       # wipe data
+```
+
 > [!NOTE]
-> **Automatic Model Downloads**
-> - The Qwen2.5 1.5B model is automatically pulled by the `ocr_ollama` container's entrypoint script on the first startup. This may take a few minutes depending on your internet connection.
-> - The `all-MiniLM-L6-v2` Sentence-Transformers model is downloaded and cached during the `ocr_api` container's build process, so no first-request latency will occur.
+> **Model downloads**
+> - `qwen2.5:1.5b` is pulled by `scripts/ollama-entrypoint.sh` on first Ollama start.
+> - `all-MiniLM-L6-v2` is downloaded during the API/worker image build (`scripts/download_model.py`).
 
-## Integration
+## Environment variables
 
-See `docs/api-contract.md` for the full webhook integration and API spec.
+Copy from `.env.example`. Important keys:
+
+| Variable | Purpose |
+|----------|---------|
+| `SERMS_API_KEY` / `PRS_API_KEY` | Bearer tokens for inbound API auth |
+| `CALLBACK_API_KEY` | Key used when calling consumer callback URLs |
+| `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | Local LLM endpoint and model name |
+| `REDIS_URL` | Celery broker |
+| `MONGODB_URL` / `MONGODB_DATABASE` | Job store |
+| `POSTGRES_URL` | Async SQLAlchemy + pgvector connection |
+| `EMBEDDING_MODEL` | Sentence-Transformers model id |
+| `DUPLICATE_SIMILARITY_THRESHOLD` | Cosine similarity cutoff (default `0.85`) |
+| `DUPLICATE_DAYS_WINDOW` | Lookback window in days (default `90`) |
+
+The app loads `.env` via pydantic-settings (mounted into containers at `/app`).
+
+## API (summary)
+
+All endpoints except health require:
+
+```http
+Authorization: Bearer <SERMS_API_KEY|PRS_API_KEY>
+```
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/health` | Liveness (dependency checks currently stubbed) |
+| `POST` | `/api/ocr/process` | Queue receipt OCR (returns `202` + `job_id`) |
+| `POST` | `/api/duplicate-check` | Embedding similarity check |
+| `GET` | `/api/jobs/{job_id}/status` | Job status |
+| `GET` | `/api/metrics` | Aggregate processing metrics |
+
+### Submit a receipt
+
+```http
+POST /api/ocr/process
+Authorization: Bearer <API_KEY>
+Content-Type: application/json
+
+{
+  "receipt_id": 42,
+  "file_url": "https://example.com/receipt.jpg",
+  "callback_url": "https://serms.example/api/ocr/callback",
+  "source_service": "serms"
+}
+```
+
+```json
+{
+  "job_id": "uuid",
+  "status": "queued",
+  "message": "Receipt queued for OCR processing."
+}
+```
+
+When processing finishes, the worker POSTs results (or failure) to `callback_url`.
+
+Full request/response shapes: [`docs/api-contract.md`](docs/api-contract.md).
+
+Interactive OpenAPI docs (when API is up): http://localhost:8010/docs
+
+## Processing pipeline
+
+For each queued job the worker:
+
+1. Downloads the file from `file_url` (image or PDF)
+2. Preprocesses with OpenCV; runs Tesseract OCR
+3. Extracts structured fields via Ollama (vendor, date, amounts, TIN, line items, category, …)
+4. Validates TIN and classifies VAT (BIR rules)
+5. Computes a composite confidence score
+6. Stores a text embedding in PostgreSQL (pgvector)
+7. Persists job outcome in MongoDB
+8. Sends the consumer webhook callback (with retries)
+
+## Project layout
+
+```
+app/
+  api/routes/       # FastAPI routers (ocr, jobs, duplicate, health, metrics)
+  api/schemas/      # Pydantic request/response models
+  core/             # Pipeline, OCR, preprocessing, BIR, confidence, callbacks
+  db/               # MongoDB + Postgres clients and models
+  embeddings/       # Sentence-Transformers + similarity
+  llm/              # LLM provider abstraction (Ollama)
+  tasks/            # Celery app and process_receipt task
+  config.py         # Settings from environment
+alembic/            # Postgres migrations (embeddings table)
+docs/               # Product, architecture, ops, and API docs
+scripts/            # Model download + Ollama entrypoint
+tests/              # pytest suite
+```
+
+## Documentation
+
+| Doc | Description |
+|-----|-------------|
+| [`docs/index.md`](docs/index.md) | Documentation index |
+| [`docs/PRD.md`](docs/PRD.md) | Product requirements |
+| [`docs/SAD.md`](docs/SAD.md) | Architecture |
+| [`docs/SDD.md`](docs/SDD.md) | System design (routes, tasks, auth) |
+| [`docs/DSD.md`](docs/DSD.md) | Data model design |
+| [`docs/Build.md`](docs/Build.md) | Build, run, and test guide |
+| [`docs/OPS.md`](docs/OPS.md) | Operations runbook |
+| [`docs/api-contract.md`](docs/api-contract.md) | Webhook / API contract |
+| [`docs/AGENTS.md`](docs/AGENTS.md) | Notes for coding agents |
+
+## Troubleshooting
+
+| Symptom | What to check |
+|---------|----------------|
+| `docker compose up` fails on network | Create `shared-capstone-network` (see Prerequisites) |
+| Jobs stay `queued` | `docker compose logs -f worker`; confirm Redis is up |
+| LLM / extraction errors | `docker compose logs -f ollama`; confirm model pulled (`ollama list` in container) |
+| API 401 | Bearer token must match `SERMS_API_KEY` or `PRS_API_KEY` in `.env` |
+| pgvector / embedding errors | Run `alembic upgrade head` inside `api` |
+| Callback never arrives | Worker logs; consumer URL reachable from `ocr_network` / shared network |
+
+---
+
+**Last reviewed:** 2026-07-22
