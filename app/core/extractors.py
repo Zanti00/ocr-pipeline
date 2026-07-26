@@ -315,6 +315,23 @@ VENDOR_NAME_EXCLUSION_WORDS = re.compile(
     r"\b(tel|tin|date|qty|atp|ocn|permit|address|invoice|discount)\b", re.IGNORECASE
 )
 
+# Document titles, matched loosely because OCR mangles them. 'OFFICIAL RECEIPT'
+# came back as 'OFFICIAL RECEIpr' and slipped past an exact-substring exclusion.
+DOCUMENT_TITLE_RE = re.compile(
+    r"offi\w*\s*rece\w*|sale\w*\s*invo\w*|provisional\s*rece\w*|"
+    r"servi\w*\s*invo\w*|billing\s*state\w*",
+    re.IGNORECASE,
+)
+
+# Words that make up table column headings. A line composed only of these is
+# furniture, not a business name - 'Description Amount' was being reported as the
+# vendor with full confidence, which is worse than reporting nothing.
+HEADING_VOCABULARY = frozenset({
+    "description", "amount", "qty", "quantity", "unit", "units", "price", "cost",
+    "particulars", "nature", "service", "item", "items", "total", "no", "rate",
+    "vat", "sales", "net", "gross", "less", "add", "code", "ref",
+})
+
 CUSTOMER_MARKERS = ("received from", "registered name", "sold to", "bill to")
 
 
@@ -364,6 +381,10 @@ def find_vendor_candidates(
                 continue
             if VENDOR_NAME_EXCLUSION_WORDS.search(stripped):
                 continue
+            if DOCUMENT_TITLE_RE.search(stripped):
+                continue
+            if _is_column_heading(stripped):
+                continue
             if not looks_like_words(stripped):
                 continue
 
@@ -394,6 +415,18 @@ def find_vendor_candidates(
         name for name, _ in sorted(result.meta.items(), key=lambda kv: kv[1].index)
     ]
     return result
+
+
+def _is_column_heading(line: str) -> bool:
+    """Is every word on this line part of a table heading?
+
+    Requires all tokens to be heading vocabulary, so a real name containing one
+    such word ('Metro Hardware and Construction Supply') is unaffected.
+    """
+    tokens = re.findall(r"[A-Za-z]{2,}", line.casefold())
+    if not tokens:
+        return False
+    return all(token in HEADING_VOCABULARY for token in tokens)
 
 
 def text_lines(lines: list[list[Word]]) -> list[str]:

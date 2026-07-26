@@ -56,6 +56,7 @@ def run(path: Path, as_json: bool, show_variants: bool, receipt_id: int) -> int:
         reconciled=result.reconciled,
         locale_resolved=bool(result.locale and result.locale.resolved),
         mean_word_confidence=bundle.confidence,
+        derived_fields=set(result.money.derived) if result.money else set(),
     )
     breakdown = compute_confidence(
         verification,

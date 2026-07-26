@@ -29,6 +29,9 @@ ENTITY_MARKERS = (
     "store", "mart", "market", "supermarket", "pharmacy", "laboratory", "labs",
     "press", "printing", "services", "solutions", "hotel", "inn", "resort",
     "wholesaling", "retail", "foods", "bakeshop", "grill", "diner",
+    "transport", "logistics", "construction", "supply", "supplies", "industries",
+    "holdings", "group", "ventures", "marketing", "distributor", "clinic",
+    "diagnostics", "telecom", "communications", "philippines", "residences",
 )
 
 # Address, contact and form-furniture lines. These sit in the header and look like
@@ -41,6 +44,18 @@ ADDRESS_MARKERS = (
 )
 
 PROPRIETOR_MARKERS = ("prop.", "proprietor", "- prop", "owner")
+
+# Structural address patterns the substring list cannot express. A floor
+# designation like '2/F Ever Gotesco Cc' carries no address *word*, so it scored as
+# a plausible business name and outranked the real header.
+ADDRESS_PATTERNS = re.compile(
+    r"\b\d+\s*/\s*[a-z]\b"          # 2/F, 3/f
+    r"|\b[a-z]?\d+\s*(?:st|nd|rd|th)\s+(?:floor|flr)\b"
+    r"|\bcor\.?\s"                   # 'cor.' as in 'X cor. Y'
+    r"|\b(?:blvd|ave|st|rd|hwy|lot|blk|brgy|bldg|unit|suite|rm)\b\.?"
+    r"|\b\d{4,5}\b.*\b(?:city|manila|philippines)\b",
+    re.IGNORECASE,
+)
 
 MIN_CANDIDATE_SCORE = 1.0
 SHORTLIST_SIZE = 5
@@ -87,6 +102,8 @@ def rank_candidates(
         score += 1.2 * min(marker_hits, 2)
 
         if any(marker in lowered for marker in ADDRESS_MARKERS):
+            score -= 2.5
+        if ADDRESS_PATTERNS.search(line):
             score -= 2.5
         if any(marker in lowered for marker in PROPRIETOR_MARKERS):
             score -= 1.0

@@ -39,6 +39,11 @@ MAX_UPSCALE = 3.0
 MAX_DESKEW_DEGREES = 15.0
 MIN_QUAD_AREA_RATIO = 0.50
 
+# Tesseract's orientation confidence is unbounded; genuine rotations typically
+# score well above 1, while noise sits near zero. Measured false positives on
+# receipts came in around 0.1-0.2.
+MIN_ORIENTATION_CONFIDENCE = 2.0
+
 
 @dataclass
 class Variant:
@@ -60,19 +65,38 @@ def to_gray(image: Image.Image) -> np.ndarray:
 def correct_orientation(image: Image.Image) -> Image.Image:
     """Rotate to upright using Tesseract's orientation detection.
 
-    Requires the ``osd`` traineddata. If unavailable, the image is returned
+    Only acts on a *confident* detection. Tesseract's OSD reports a rotation
+    regardless of how weak the evidence is, and on receipts - short lines, sparse
+    text, large blank areas - it guesses badly. An upright synthetic slip was
+    reported as 180 degrees with ``orientation_conf`` 0.12 (and its script
+    identified as Arabic), and rotating on that reading turned a perfectly
+    readable receipt upside down, taking every field with it.
+
+    Ignoring rotation when unsure is the safe failure: a wrongly upright page
+    still reads, whereas a wrongly inverted one reads as nothing.
+
+    Requires the ``osd`` traineddata; if unavailable the image is returned
     unchanged rather than failing the job.
     """
     try:
         osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
         rotate = int(osd.get("rotate", 0)) % 360
+        confidence = float(osd.get("orientation_conf", 0.0))
     except Exception as exc:  # pragma: no cover - depends on tessdata presence
         logger.debug("Orientation detection unavailable: %s", exc)
         return image
-    if rotate:
-        # PIL rotates counter-clockwise; OSD reports clockwise correction.
-        return image.rotate(-rotate, expand=True, fillcolor="white")
-    return image
+
+    if not rotate:
+        return image
+    if confidence < MIN_ORIENTATION_CONFIDENCE:
+        logger.debug(
+            "Ignoring %s deg orientation: confidence %.2f below %.2f",
+            rotate, confidence, MIN_ORIENTATION_CONFIDENCE,
+        )
+        return image
+
+    # PIL rotates counter-clockwise; OSD reports the clockwise correction.
+    return image.rotate(-rotate, expand=True, fillcolor="white")
 
 
 def correct_perspective(gray: np.ndarray) -> tuple[np.ndarray, bool]:

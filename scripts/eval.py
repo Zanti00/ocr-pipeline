@@ -42,8 +42,8 @@ VARIANTS = {
 }
 
 
-def recoverability(variant: str, dump_dir: Path | None) -> int:
-    truths = load_ground_truth()
+def recoverability(variant: str, dump_dir: Path | None, corpus: str = "real") -> int:
+    truths = load_ground_truth(corpus=corpus)
     runner = VARIANTS[variant]
     rows: list[RecoverabilityRow] = []
 
@@ -159,7 +159,7 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
     from app.core.ocr_engine import read_pooled
     from app.core.verification import verify
     from app.eval.compare import Outcome, classify, is_grounded
-    from app.eval.groundtruth import FIELD_SPECS
+    from app.eval.groundtruth import FIELD_SPECS, Gate
     from app.eval.report import (
         empty_tallies, render_accuracy, render_fabrication,
     )
@@ -201,8 +201,10 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
         country = produced.get("country")
         confidence_rows.append(
             (truth.image, truth.expect_manual_review, breakdown.score,
-             breakdown.flagged_by_consumer, verification.reasons)
+             breakdown.flagged_by_consumer, verification.reasons, None)
         )
+        row_index = len(confidence_rows) - 1
+        receipt_fields_correct = True
 
         if verbose:
             print(f"\n--- {truth.image} "
@@ -230,6 +232,8 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
                 accepted_alternatives=truth.also_acceptable.get(spec.name),
             )
             tallies[spec.name].outcomes.append(outcome)
+            if spec.gate is not Gate.UNTRACKED and not outcome.is_pass:
+                receipt_fields_correct = False
             if outcome.is_populated:
                 populated += 1
                 # Arithmetically derived values are exempt, matching the rule the
@@ -241,6 +245,10 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
                 if not is_grounded(spec, produced.get(spec.name), bundle.combined_text):
                     tallies[spec.name].ungrounded += 1
                     ungrounded_total += 1
+
+        confidence_rows[row_index] = (
+            *confidence_rows[row_index][:5], receipt_fields_correct,
+        )
 
         # Abstention is expected when the figures are unreadable. A receipt whose
         # arithmetic is deliberately inconsistent has a perfectly legible total,
@@ -286,30 +294,64 @@ def _tax_id_ambiguous(result) -> bool:
 
 
 def _render_routing(rows: list, threshold: float) -> str:
-    """Does the confidence score route each receipt the way it should?
+    """Does the confidence score route each receipt safely?
 
-    SERMS flags anything below 0.80 for manual confirmation, so this checks that
-    abstentions land below the line and clean reads land above it.
+    The two ways of getting this wrong are not equivalent, and an earlier version
+    of this report treated them as if they were:
+
+    * FALSE ACCEPT - scored above the threshold while a gated field is wrong. The
+      receipt reaches the financial system unreviewed and incorrect. This is the
+      failure that matters, and the target is zero.
+    * CAUTIOUS FLAG - scored below the threshold although the fields were right.
+      Costs a reviewer's time and nothing else.
+
+    Reporting a single "routed correctly" figure hid the distinction, and counted a
+    correctly-flagged misread under severe degradation as a mistake.
     """
+    false_accepts: list[tuple] = []
+    cautious: list[tuple] = []
+    safe_accepts = correct_flags = 0
+
+    for row in rows:
+        image, expect_review, score, flagged, reasons = row[:5]
+        fields_correct = row[5] if len(row) > 5 else None
+
+        if flagged:
+            if fields_correct is False or expect_review:
+                correct_flags += 1
+            else:
+                cautious.append((image, score, reasons))
+        else:
+            if fields_correct is False or expect_review:
+                false_accepts.append((image, score, reasons))
+            else:
+                safe_accepts += 1
+
+    total = max(len(rows), 1)
     lines = [
         "",
-        f"CONSUMER ROUTING  --  SERMS flags score < {threshold:.2f} as 'flagged'",
+        f"CONSUMER ROUTING  --  SERMS flags score < {threshold:.2f} for manual review",
         "",
-        f"  {'receipt':<16}{'score':>7}  {'expected':<12}{'actual':<12}reasons",
-        "  " + "-" * 88,
+        f"  accepted and correct      {safe_accepts:>4}  ({safe_accepts / total:.1%})",
+        f"  flagged, needed review    {correct_flags:>4}  ({correct_flags / total:.1%})",
+        f"  flagged but was fine      {len(cautious):>4}  "
+        f"({len(cautious) / total:.1%})  cautious - costs review time only",
+        f"  ACCEPTED BUT WRONG        {len(false_accepts):>4}  "
+        f"({len(false_accepts) / total:.1%})  target 0",
     ]
-    correct = 0
-    for image, expect_review, score, flagged, reasons in rows:
-        expected = "flagged" if expect_review else "pending"
-        actual = "flagged" if flagged else "pending"
-        ok = expected == actual
-        correct += 1 if ok else 0
-        marker = " " if ok else "<-- MISROUTED"
-        lines.append(
-            f"  {image:<16}{score:>7.3f}  {expected:<12}{actual:<12}"
-            f"{','.join(reasons[:3]) or '-'}{marker}"
-        )
-    lines.append(f"  -> {correct}/{len(rows)} routed correctly")
+
+    safe = len(false_accepts) == 0
+    lines.append(f"\n  unreviewed incorrect data reaching SERMS: "
+                 f"{'NONE [PASS]' if safe else 'PRESENT [FAIL]'}")
+
+    if false_accepts:
+        lines.append("\n  false accepts:")
+        for image, score, reasons in false_accepts[:15]:
+            lines.append(f"    {image:<28}{score:>7.3f}  {','.join(reasons[:3]) or '-'}")
+    if cautious:
+        lines.append("\n  cautious flags (first 10):")
+        for image, score, reasons in cautious[:10]:
+            lines.append(f"    {image:<28}{score:>7.3f}  {','.join(reasons[:3]) or '-'}")
     return "\n".join(lines)
 
 
@@ -360,6 +402,7 @@ def main() -> int:
 
     recover = sub.add_parser("recoverability", help="OCR-only ceiling measurement")
     recover.add_argument("--variant", choices=sorted(VARIANTS), default="baseline")
+    recover.add_argument("--corpus", choices=sorted(CORPORA), default="real")
     recover.add_argument("--dump-dir", type=Path, default=None,
                          help="write raw OCR text per receipt for inspection")
 
@@ -373,7 +416,7 @@ def main() -> int:
 
     args = parser.parse_args()
     if args.mode == "recoverability":
-        return recoverability(args.variant, args.dump_dir)
+        return recoverability(args.variant, args.dump_dir, corpus=args.corpus)
     if args.mode == "sweep":
         return sweep()
     if args.mode == "accuracy":
