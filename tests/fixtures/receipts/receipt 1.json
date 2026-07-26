@@ -1,0 +1,30 @@
+{
+  "image": "receipt 1.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": false,
+  "notes": "US thermal POS receipt. Contains TWO dates: 5/24/2025 11:47:32 AM is the transaction; 11/20/2019 11:09 AM is the card terminal date/time and must NOT be selected. Tesseract renders decimals as commas ($29 ,99 / $2,51 / $32,50) so numeric normalisation is required. Sales tax, not VAT - no TIN exists on US receipts.",
+  "expected": {
+    "vendor_name": "Jollibee Las Vegas",
+    "country": "US",
+    "currency": "USD",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": "2025-05-24",
+    "net_sales": 29.99,
+    "tax_amount": 2.51,
+    "tax_type": "SALES_TAX",
+    "total_sales": 32.50,
+    "service_charge": null,
+    "total_amount": 32.50,
+    "vat_classification": null,
+    "invoice_number": "340",
+    "expense_category": "Meals"
+  },
+  "expected_items": [
+    { "name": "Family bundle 10pcs", "quantity": 1, "price": 29.99 }
+  ],
+  "unknown": ["tax_rate"]
+}

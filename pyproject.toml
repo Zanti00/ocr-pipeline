@@ -17,6 +17,8 @@ dependencies = [
     "Pillow>=10.3.0",
     "opencv-python-headless>=4.9.0",
     "pdf2image>=1.17.0",
+    # Fuzzy matching for vendor-name grounding and constrained selection.
+    "rapidfuzz>=3.9.0",
     "httpx>=0.27.0",
     "pydantic-settings>=2.2.1",
     "alembic>=1.13.1"

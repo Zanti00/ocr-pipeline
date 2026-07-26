@@ -1,0 +1,23 @@
+{
+  "image": "receipt 5.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "handwritten_form",
+  "truth_source": "ocr_text_partial",
+  "expect_manual_review": true,
+  "notes": "Cropped fragment of a PH VAT official receipt. 'KUMHO INC' appears after 'RECEIVED from' and is therefore the PAYER/CUSTOMER, not the vendor; extracting it as vendor_name is a fabrication. Printed labels 'Total Sales (VAT Inclusive)' and 'Less: VAT' establish this as VAT-registered. All hand-written values are unreadable. No document border is visible, so perspective-correction quad detection must decline to warp this image. CORRECTION: an earlier note here asserted the vendor header was out of frame, based on a default-PSM read. The multi-variant read recovers 'VAT Reg. TIN: 143-009-119-00000 + Leonido G. Gath...-Prop.', so a vendor header does exist but is only partly legible. Since the image cannot be inspected directly, vendor_name and vendor_tax_id are moved to unknown rather than asserted either way.",
+  "expected": {
+    "country": "PH",
+    "currency": "PHP",
+    "vat_classification": "vat",
+    "tax_type": "VAT"
+  },
+  "not_expected_values": {
+    "vendor_name": ["KUMHO INC", "Kumho Inc.", "17- KUMHO INC"]
+  },
+  "unknown": [
+    "vendor_name", "vendor_tax_id", "vendor_tax_id_type", "transaction_date",
+    "net_sales", "tax_amount", "tax_rate", "total_sales", "service_charge",
+    "total_amount", "invoice_number", "expense_category", "items"
+  ]
+}

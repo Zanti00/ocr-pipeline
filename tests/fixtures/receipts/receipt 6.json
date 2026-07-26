@@ -1,0 +1,27 @@
+{
+  "image": "receipt 6.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "handwritten_form",
+  "truth_source": "ocr_text_partial",
+  "expect_manual_review": true,
+  "notes": "PH VAT official receipt from 2012, hand-filled. Printed header is recoverable. KEY CASE for TIN normalisation: Tesseract splits the tax id as '000-774-47 1-025' (stray space inside 471), so pattern matching on raw text fails and digit-extraction normalisation is required to recover 000774471025. 'Rey Nimfa' follows 'RECEIVED from' and is the customer, not the vendor. Amount is hand-written in words and unreadable.",
+  "expected": {
+    "vendor_name": "Bayan Telecommunications, Inc.",
+    "country": "PH",
+    "currency": "PHP",
+    "vendor_tax_id": "000-774-471-025",
+    "vendor_tax_id_type": "PH_TIN",
+    "transaction_date": "2012-08-09",
+    "vat_classification": "vat",
+    "tax_type": "VAT",
+    "expense_category": "Others"
+  },
+  "not_expected_values": {
+    "vendor_name": ["Rey Nimfa"]
+  },
+  "unknown": [
+    "net_sales", "tax_amount", "tax_rate", "total_sales", "service_charge",
+    "total_amount", "invoice_number", "items"
+  ]
+}

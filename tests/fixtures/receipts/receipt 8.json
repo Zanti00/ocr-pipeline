@@ -1,0 +1,26 @@
+{
+  "image": "receipt 8.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "handwritten_form",
+  "truth_source": "ocr_text_partial",
+  "expect_manual_review": true,
+  "notes": "PH provisional receipt (newspaper subscription), hand-filled. Printed header gives vendor and VAT TIN. The amount exists ONLY as hand-written words - 'THREE HUNDRED PESOS' - never as digits, so digit-based grounding will correctly refuse it and the field must come back null with the receipt flagged. total_amount is recorded here as the true value for accuracy reference, but 300.00 is not expected to be extractable by a digits-only pipeline. Date is hand-written and illegible.",
+  "expected": {
+    "vendor_name": "United Daily Press Inc.",
+    "country": "PH",
+    "currency": "PHP",
+    "vendor_tax_id": "008-666-750-000",
+    "vendor_tax_id_type": "PH_TIN",
+    "total_amount": 300.00,
+    "vat_classification": "vat",
+    "tax_type": "VAT",
+    "invoice_number": "48634",
+    "expense_category": "Others"
+  },
+  "amount_in_words_only": true,
+  "unknown": [
+    "transaction_date", "net_sales", "tax_amount", "tax_rate",
+    "total_sales", "service_charge", "items"
+  ]
+}

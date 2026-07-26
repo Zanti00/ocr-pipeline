@@ -1,0 +1,31 @@
+{
+  "image": "receipt 3.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "handwritten_form",
+  "truth_source": "user_provided",
+  "expect_manual_review": true,
+  "notes": "PH VAT-registered service invoice, values hand-filled. Ground truth supplied directly by the user and arithmetically self-consistent: 1166.07 x 1.12 = 1306.00, and 1306.00 + (1166.07 x 0.10 service charge) = 1422.61. TWO tax IDs are present - 303-124-202-00000 is the VENDOR (header, 'VAT Reg. TIN'), 201-841-917-000 belongs to Scientific Biotech Specialties Inc. which is the CUSTOMER ('Registered Name') and must not be selected. Note the 5-digit branch code 00000, which the current validate_tin regex rejects. None of the money values appear anywhere in Tesseract output, so correct system behaviour is to abstain and flag, not to guess.",
+  "expected": {
+    "vendor_name": "Yamachan Japanese Restaurant",
+    "country": "PH",
+    "currency": "PHP",
+    "vendor_tax_id": "303-124-202-00000",
+    "vendor_tax_id_type": "PH_TIN",
+    "transaction_date": "2026-03-07",
+    "net_sales": 1166.07,
+    "tax_amount": 139.93,
+    "tax_type": "VAT",
+    "tax_rate": 0.12,
+    "total_sales": 1306.00,
+    "service_charge": 116.61,
+    "total_amount": 1422.61,
+    "vat_classification": "vat",
+    "expense_category": "Meals"
+  },
+  "not_expected_values": {
+    "vendor_tax_id": ["201-841-917-000"],
+    "vendor_name": ["Scientific Biotech Specialties, Inc."]
+  },
+  "unknown": ["invoice_number", "items"]
+}

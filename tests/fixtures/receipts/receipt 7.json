@@ -1,0 +1,21 @@
+{
+  "image": "receipt 7.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "handwritten_form",
+  "truth_source": "ocr_text_partial",
+  "expect_manual_review": true,
+  "notes": "PH official receipt with near-total OCR failure - only the printed vendor name and receipt number survive; the rest of the page degrades into noise ('Framers |_ sour ier', 'parmesan a Sip waeaiet'). This is the strongest abstention test in the set: a system that returns any money value here is fabricating, because no digits beyond the receipt number are legible.",
+  "expected": {
+    "vendor_name": "Detoxicare Molecular Diagnostics Laboratory Inc.",
+    "country": "PH",
+    "currency": "PHP",
+    "invoice_number": "0108",
+    "expense_category": "Others"
+  },
+  "unknown": [
+    "vendor_tax_id", "vendor_tax_id_type", "transaction_date", "net_sales",
+    "tax_amount", "tax_type", "tax_rate", "total_sales", "service_charge",
+    "total_amount", "vat_classification", "items"
+  ]
+}

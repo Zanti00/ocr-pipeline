@@ -11,3 +11,9 @@ __pycache__/
 
 # Project Documentation
 /docs/
+
+# evaluation harness output
+.eval_out/
+
+# generated synthetic corpus (reproducible from a seed)
+tests/fixtures/synthetic/
