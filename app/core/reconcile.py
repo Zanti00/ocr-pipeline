@@ -36,6 +36,7 @@ class MoneyResult:
     reconciliation_notes: list[str] = field(default_factory=list)
     tax_rate: float | None = None
     tax_type: str | None = None
+    vat_registered: bool = True
     derivations: set[str] = field(default_factory=set)
     """Which gaps were filled arithmetically, so tautologies can be excluded.
 
@@ -49,9 +50,20 @@ class MoneyResult:
         return self.values.get(name)
 
 
-def resolve_money(scan: LayoutScan, locale: LocaleGuess) -> MoneyResult:
+def resolve_money(
+    scan: LayoutScan, locale: LocaleGuess, vat_registered: bool = True
+) -> MoneyResult:
+    """Resolve the money fields, deriving gaps where the arithmetic allows.
+
+    ``vat_registered`` gates the PH VAT derivations. A non-VAT sales invoice
+    carries no VAT at all, so dividing its total by 1.12 invents both a net figure
+    and a tax figure - and because derived values are exempt from grounding, those
+    inventions shipped at 0.99 confidence. On a 75.00 non-VAT invoice the pipeline
+    reported net 66.96 and tax 8.04, neither of which exists.
+    """
     country = locale.country
     result = MoneyResult()
+    result.vat_registered = vat_registered
 
     for name in MONEY_FIELDS:
         labeled = scan.first(name)
@@ -63,12 +75,14 @@ def resolve_money(scan: LayoutScan, locale: LocaleGuess) -> MoneyResult:
         if value is not None:
             result.evidence[name] = labeled.evidence
 
-    _fill_gaps(result, scan, country)
+    _fill_gaps(result, scan, country, vat_registered)
     _reconcile(result, country)
     return result
 
 
-def _fill_gaps(result: MoneyResult, scan: LayoutScan, country: str | None) -> None:
+def _fill_gaps(
+    result: MoneyResult, scan: LayoutScan, country: str | None, vat_registered: bool
+) -> None:
     """Derive missing figures arithmetically instead of letting a model guess.
 
     Deterministic arithmetic beats a 1.5B model at maths every time, and a derived
@@ -81,6 +95,18 @@ def _fill_gaps(result: MoneyResult, scan: LayoutScan, country: str | None) -> No
     service = result.get("service_charge")
 
     is_ph = country == "PH"
+
+    if is_ph and not vat_registered:
+        # Non-VAT invoice: sales are simply the amount, with no tax component to
+        # split out. Never manufacture one.
+        if net is None and total_sales is not None:
+            result.values["net_sales"] = total_sales
+            result.derived.add("net_sales")
+            result.derivations.add("net_equals_sales_non_vat")
+            result.evidence["net_sales"] = (
+                f"derived: equals total sales {total_sales} (non-VAT, no tax)"
+            )
+        is_ph = False  # skip every VAT-specific derivation below
 
     if is_ph and net is None and total_sales is not None:
         net = round(total_sales / (1 + PH_VAT_RATE), 2)

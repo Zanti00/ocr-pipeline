@@ -146,11 +146,22 @@ def select_vendor_tax_id(candidates: list[TaxIdCandidate]) -> TaxIdCandidate | N
 # dates
 # ---------------------------------------------------------------------------
 
-DATE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+DATE_PATTERNS_MONTH_FIRST: tuple[tuple[str, tuple[str, ...]], ...] = (
     (r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", ("%Y", "%m", "%d")),
     (r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b", ("%m", "%d", "%Y")),
     (r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b", ("%m", "%d", "%y")),
 )
+
+DATE_PATTERNS_DAY_FIRST: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", ("%Y", "%m", "%d")),
+    (r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b", ("%d", "%m", "%Y")),
+    (r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b", ("%d", "%m", "%y")),
+)
+
+# Countries that write the month first. Everywhere else, '05/03/2024' is 5 March,
+# not 5 May - and whenever the day is 12 or lower both readings parse cleanly, so
+# there is no way to detect the mistake after the fact. Locale has to decide.
+MONTH_FIRST_COUNTRIES = frozenset({"US", "PH"})
 
 MONTH_NAME_RE = re.compile(
     r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\s*,?\s*(\d{4})\b",
@@ -195,12 +206,21 @@ class DateCandidate:
     score: float = 0.0
 
 
-def find_dates(lines: list[str], today: date | None = None) -> list[DateCandidate]:
+def find_dates(
+    lines: list[str], today: date | None = None, country: str | None = None
+) -> list[DateCandidate]:
+    """Locate transaction-date candidates, ranked.
+
+    ``country`` selects day-first or month-first interpretation of an all-numeric
+    date. Without it, Malaysian and Bruneian receipts silently transpose day and
+    month on any date up to the 12th.
+    """
     today = today or date.today()
+    month_first = country is None or country.upper() in MONTH_FIRST_COUNTRIES
     candidates: list[DateCandidate] = []
 
     for index, line_text in enumerate(lines):
-        for parsed, raw in _parse_line_dates(line_text):
+        for parsed, raw in _parse_line_dates(line_text, month_first=month_first):
             if not (date(1990, 1, 1) <= parsed <= today):
                 continue  # reject impossible / future transaction dates
             candidates.append(
@@ -221,7 +241,9 @@ def find_dates(lines: list[str], today: date | None = None) -> list[DateCandidat
     return sorted(candidates, key=lambda c: -c.score)
 
 
-def _parse_line_dates(line_text: str) -> list[tuple[date, str]]:
+def _parse_line_dates(
+    line_text: str, month_first: bool = True
+) -> list[tuple[date, str]]:
     found: list[tuple[date, str]] = []
 
     for match in MONTH_NAME_RE.finditer(line_text):
@@ -235,7 +257,8 @@ def _parse_line_dates(line_text: str) -> list[tuple[date, str]]:
         year += 2000 if year < 100 else 0
         found.append((_safe_date(year, month, int(match.group(1))), match.group(0)))
 
-    for pattern, order in DATE_PATTERNS:
+    patterns = DATE_PATTERNS_MONTH_FIRST if month_first else DATE_PATTERNS_DAY_FIRST
+    for pattern, order in patterns:
         for match in re.finditer(pattern, line_text):
             parts = dict(zip(order, match.groups()))
             year = int(parts.get("%Y") or parts.get("%y") or 0)
@@ -243,7 +266,7 @@ def _parse_line_dates(line_text: str) -> list[tuple[date, str]]:
                 year += 2000
             month, day = int(parts["%m"]), int(parts["%d"])
             if month > 12 and day <= 12:
-                month, day = day, month  # day-first rendering
+                month, day = day, month  # impossible month: the order was reversed
             found.append((_safe_date(year, month, day), match.group(0)))
 
     return [(value, raw) for value, raw in found if value is not None]

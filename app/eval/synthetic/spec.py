@@ -62,10 +62,17 @@ US_VENDORS = (
      ("1821 Boren Ave", "Seattle WA 98101")),
 )
 
+# Malaysian vendors only. 'Yayasan Complex' was previously listed here with a
+# Kuala Lumpur address, which is self-contradictory: Yayasan Complex is in Bandar
+# Seri Begawan, so the receipt asserted Malaysia while its address said Brunei.
+# The pipeline read BN and was scored wrong for a fault in the corpus.
 MY_VENDORS = (
-    ("Jollibee Yayasan Complex", "Meals",
-     ("Jollibee Yayasan Complex BO6", "Kuala Lumpur, Malaysia")),
-    ("Secret Recipe Sdn. Bhd.", "Meals", ("Lot 12 Jalan Ampang", "Kuala Lumpur")),
+    ("Secret Recipe Sdn. Bhd.", "Meals",
+     ("Lot 12 Jalan Ampang", "50450 Kuala Lumpur, Malaysia")),
+    ("Nasi Kandar Pelita Sdn. Bhd.", "Meals",
+     ("149 Jalan Ampang", "Kuala Lumpur, Malaysia")),
+    ("Mydin Wholesale Sdn. Bhd.", "Supplies",
+     ("Lot 5 Jalan Tun Razak", "Kuala Lumpur, Malaysia")),
 )
 
 MENU_ITEMS = (
@@ -78,8 +85,16 @@ MENU_ITEMS = (
     ("Laboratory Test Panel", 1450.0), ("Newspaper Subscription", 300.0),
 )
 
-DATE_FORMATS = ("%m-%d-%Y", "%m/%d/%Y", "%d-%m-%Y", "%b. %d, %Y", "%B %d, %Y",
-                "%Y-%m-%d", "%d %b %Y")
+# Numeric date formats must follow the locale's convention, because an all-numeric
+# date up to the 12th is genuinely ambiguous: '07-11-2025' is 7 November or 11 July
+# depending on where the receipt came from, and nothing in the document resolves it.
+# Rendering a day-first date on a month-first receipt puts an unanswerable question
+# in the corpus, which measures the generator rather than the pipeline.
+MONTH_FIRST_FORMATS = ("%m-%d-%Y", "%m/%d/%Y", "%Y-%m-%d",
+                       "%b. %d, %Y", "%B %d, %Y")
+DAY_FIRST_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d",
+                     "%d %b %Y", "%d %B %Y")
+DATE_FORMATS = MONTH_FIRST_FORMATS  # retained for callers expecting the old name
 FONTS = ("arial", "calibri", "verdana", "tahoma", "consola", "cour", "times", "lucon")
 
 CUSTOMERS = (
@@ -93,10 +108,26 @@ class LineItem:
     name: str
     quantity: int
     unit_price: float
+    description: str | None = None
+    """An unpriced continuation line printed beneath the item.
+
+    Real receipts do this constantly - 'Family bundle--10pcs' followed by
+    'Chickenjoy bucket + 3 large sides' is one purchase across two printed lines.
+    Without descriptions in the corpus, the rule that folds them into a single row
+    is untested, and a parser that emitted a phantom second row would still score
+    well.
+    """
 
     @property
     def amount(self) -> float:
         return round(self.quantity * self.unit_price, 2)
+
+    @property
+    def expected_name(self) -> str:
+        """The name after folding, which is what extraction should produce."""
+        if self.description:
+            return f"{self.name} {self.description}"
+        return self.name
 
 
 @dataclass
@@ -160,17 +191,39 @@ def build_spec(index: int, rng: random.Random, template: str | None = None) -> R
     raise ValueError(f"Unknown template {template!r}")
 
 
+# Unpriced continuation lines, printed under an item to describe it.
+ITEM_DESCRIPTIONS = (
+    "Chickenjoy bucket + 3 large sides",
+    "includes 2 regular drinks",
+    "with garlic rice and egg",
+    "family size, good for 4",
+    "ream of 500 sheets",
+    "black ink, high yield",
+    "single occupancy, breakfast included",
+    "one way, economy",
+)
+
+
 def _items(rng: random.Random, count: int) -> list[LineItem]:
     chosen = rng.sample(MENU_ITEMS, k=min(count, len(MENU_ITEMS)))
-    return [
-        LineItem(name=name, quantity=rng.randint(1, 3), unit_price=price)
-        for name, price in chosen
-    ]
+    items: list[LineItem] = []
+    for name, price in chosen:
+        items.append(LineItem(
+            name=name,
+            quantity=rng.randint(1, 3),
+            unit_price=price,
+            # Roughly a third of lines carry a description, so most receipts in the
+            # corpus exercise the folding rule at least once.
+            description=rng.choice(ITEM_DESCRIPTIONS) if rng.random() < 0.35 else None,
+        ))
+    return items
 
 
-def _date(rng: random.Random) -> tuple[date, str]:
+def _date(rng: random.Random, month_first: bool = True) -> tuple[date, str, str]:
+    """Return ``(date, rendered_text, format)`` respecting the locale convention."""
     value = date.today() - timedelta(days=rng.randint(1, 900))
-    return value, value.strftime(rng.choice(DATE_FORMATS))
+    chosen = rng.choice(MONTH_FIRST_FORMATS if month_first else DAY_FIRST_FORMATS)
+    return value, value.strftime(chosen), chosen
 
 
 def _tax_id(rng: random.Random) -> str:
@@ -189,7 +242,7 @@ def _build_ph(index: int, rng: random.Random, template: str) -> ReceiptSpec:
     vendor, category, proprietor = rng.choice(PH_VENDORS)
     items = _items(rng, rng.randint(1, 4))
     gross = round(sum(item.amount for item in items), 2)
-    transaction_date, date_text = _date(rng)
+    transaction_date, date_text, date_format = _date(rng, month_first=True)
 
     if template == "ph_nonvat_si":
         net_sales = total_sales = gross
@@ -241,11 +294,20 @@ def _build_ph(index: int, rng: random.Random, template: str) -> ReceiptSpec:
 def _build_us(index: int, rng: random.Random) -> ReceiptSpec:
     vendor, category, address = rng.choice(US_VENDORS)
     items = _items(rng, rng.randint(1, 3))
-    transaction_date, date_text = _date(rng)
+    transaction_date, date_text, date_format = _date(rng, month_first=True)
 
     # US sales tax is exclusive and varies by jurisdiction, so only the additive
     # identity can be asserted - the rate itself is not predictable.
-    net_sales = round(sum(item.amount for item in items) / 10, 2)
+    # Scale each unit price rather than the total: dividing the sum afterwards left
+    # net_sales inconsistent with the printed line amounts, so the item reconcile
+    # check could never pass and the corpus was unable to measure items at all.
+    items = [
+        LineItem(name=item.name, quantity=item.quantity,
+                 unit_price=round(item.unit_price / 10, 2),
+                 description=item.description)
+        for item in items
+    ]
+    net_sales = round(sum(item.amount for item in items), 2)
     rate = rng.choice(US_TAX_RATES)
     tax_amount = round(net_sales * rate, 2)
     total = round(net_sales + tax_amount, 2)
@@ -279,9 +341,16 @@ def _build_us(index: int, rng: random.Random) -> ReceiptSpec:
 def _build_my(index: int, rng: random.Random) -> ReceiptSpec:
     vendor, category, address = rng.choice(MY_VENDORS)
     items = _items(rng, rng.randint(1, 3))
-    transaction_date, date_text = _date(rng)
+    # Malaysia writes the day first, unlike PH and US.
+    transaction_date, date_text, date_format = _date(rng, month_first=False)
 
-    net_sales = round(sum(item.amount for item in items) / 20, 2)
+    items = [
+        LineItem(name=item.name, quantity=item.quantity,
+                 unit_price=round(item.unit_price / 20, 2),
+                 description=item.description)
+        for item in items
+    ]
+    net_sales = round(sum(item.amount for item in items), 2)
     tax_amount = round(net_sales * MY_SST_RATE, 2)
     total = round(net_sales + tax_amount, 2)
 

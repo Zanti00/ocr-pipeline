@@ -102,6 +102,7 @@ async def process_receipt(
             fields=verification.fields,
             confidence=breakdown.score,
             status="completed",
+            items=extraction.item_scan.payload() if extraction.item_scan else [],
         )
         logger.info(
             "Job %s complete: variant=%s psm=%s score=%.3f reasons=%s",
@@ -272,6 +273,20 @@ def _job_document(
             "grounding_pass_rate": round(verification.grounding_pass_rate, 4),
         },
         "evidence": extraction.evidence,
+        "items": {
+            "rows_found": extraction.item_scan.count if extraction.item_scan else 0,
+            "reconciled": bool(extraction.item_scan and extraction.item_scan.reconciled),
+            "price_basis": extraction.item_scan.price_basis if extraction.item_scan
+            else "none",
+            "notes": extraction.item_scan.notes if extraction.item_scan else [],
+            # Rows found but withheld are kept here: useful for auditing why a
+            # receipt shipped without items, and never transmitted.
+            "candidates": [
+                {"name": item.full_name, "quantity": item.quantity,
+                 "price": item.price, "line": item.line_text}
+                for item in (extraction.item_scan.items if extraction.item_scan else [])
+            ],
+        },
         "reconciliation": {
             "reconciled": extraction.reconciled,
             "notes": extraction.money.reconciliation_notes if extraction.money else [],

@@ -5,7 +5,7 @@
   "print_type": "machine_printed",
   "truth_source": "ocr_text_verified",
   "expect_manual_review": false,
-  "notes": "US thermal POS receipt. Contains TWO dates: 5/24/2025 11:47:32 AM is the transaction; 11/20/2019 11:09 AM is the card terminal date/time and must NOT be selected. Tesseract renders decimals as commas ($29 ,99 / $2,51 / $32,50) so numeric normalisation is required. Sales tax, not VAT - no TIN exists on US receipts.",
+  "notes": "US thermal POS receipt. Contains TWO dates: 5/24/2025 11:47:32 AM is the transaction; 11/20/2019 11:09 AM is the card terminal date/time and must NOT be selected. Tesseract renders decimals as commas ($29 ,99 / $2,51 / $32,50) so numeric normalisation is required. Sales tax, not VAT - no TIN exists on US receipts. ITEMS: this is ONE purchase across two printed lines - '1 Family bundle--10pcs' priced at 29.99, with 'Chickenjoy bucket + 3 large sides' as an unpriced description beneath it. The correct output is a single row with quantity 1 (the receipt's own quantity column) and the description folded into the name. '10pcs' describes the bundle contents and must not be read as a quantity: 10 x 29.99 would overstate the line tenfold.",
   "expected": {
     "vendor_name": "Jollibee Las Vegas",
     "country": "US",
@@ -24,7 +24,11 @@
     "expense_category": "Meals"
   },
   "expected_items": [
-    { "name": "Family bundle 10pcs", "quantity": 1, "price": 29.99 }
+    {
+      "name": "Family bundle--10pcs Chickenjoy bucket + 3 large sides",
+      "quantity": 1,
+      "price": 29.99
+    }
   ],
   "unknown": ["tax_rate"]
 }

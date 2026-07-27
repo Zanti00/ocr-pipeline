@@ -25,6 +25,7 @@ from app.core.extractors import (
     select_vendor_tax_id,
     text_lines,
 )
+from app.core.items import ItemScan, parse_items, reconcile_items
 from app.core.layout import LayoutScan, scan_layout
 from app.core.locale import LocaleGuess, detect_locale
 from app.core.ocr_engine import OcrBundle
@@ -47,6 +48,7 @@ class Extraction:
     vendor_candidates: VendorCandidates = field(default_factory=VendorCandidates)
     vendor_choice: VendorChoice | None = None
     category_choice: CategoryChoice | None = None
+    item_scan: ItemScan | None = None
     evidence: dict[str, str] = field(default_factory=dict)
     lines: list[str] = field(default_factory=list)
 
@@ -82,12 +84,15 @@ def extract(
     # segmentation keeps a label and its figure on one row, while sparse-text mode
     # scatters them, so every pooled reading is scanned and the most productive
     # one is kept.
-    layout, money = _best_layout(bundle, locale)
+    # VAT registration is read from the printed header, before any money is
+    # resolved, because it decides whether VAT may be derived at all.
+    vat_registered = classify_tax(combined, locale, None) == "vat"
+    layout, money = _best_layout(bundle, locale, vat_registered)
 
     tax_ids = find_tax_ids(pooled_lines)
     vendor_tax = select_vendor_tax_id(tax_ids)
 
-    dates = find_dates(pooled_lines)
+    dates = find_dates(pooled_lines, country=locale.country)
     best_date = dates[0] if dates and dates[0].score > 0 else None
 
     invoice_number, invoice_line = find_invoice_number(pooled_lines)
@@ -119,6 +124,7 @@ def extract(
         lines=pooled_lines,
     )
 
+    item_scan = _best_items(bundle, money)
     vat_classification = classify_tax(combined, locale, money.get("tax_amount"))
 
     extraction.fields = {
@@ -143,6 +149,7 @@ def extract(
     }
     extraction.vendor_choice = vendor_choice
     extraction.category_choice = category
+    extraction.item_scan = item_scan
 
     extraction.evidence.update(money.evidence)
     if vendor_tax:
@@ -161,6 +168,11 @@ def extract(
     extraction.evidence["vendor_name"] = (
         f"{vendor_choice.method} from {vendor_choice.shortlist[:3]}"
     )
+    if item_scan.notes:
+        extraction.evidence["items"] = (
+            f"{item_scan.count} row(s), basis={item_scan.price_basis}; "
+            + "; ".join(item_scan.notes)
+        )
     extraction.evidence["expense_category"] = (
         f"{category.method}"
         + (f" (runner-up {category.runner_up}, sim {category.similarity})"
@@ -170,7 +182,53 @@ def extract(
     return extraction
 
 
-def _best_layout(bundle: OcrBundle, locale: LocaleGuess) -> tuple[LayoutScan, MoneyResult]:
+def _best_items(bundle: OcrBundle, money: MoneyResult) -> ItemScan:
+    """Parse items from whichever reading produces a set that adds up.
+
+    Item parsing needs a reading that preserves visual rows, and that is generally
+    NOT the anchor-selected primary: sparse-text segmentation scores highest on
+    anchors while emitting the amount column separately from the item names, in
+    reverse order. Rather than guess which page-segmentation mode to trust, every
+    pooled reading is parsed and the arithmetic decides - a reading whose items sum
+    to the printed subtotal has almost certainly read the rows correctly.
+
+    Uses readings already computed for the OCR stage, so this costs no extra
+    Tesseract work.
+    """
+    targets = {
+        "net_sales": money.get("net_sales"),
+        "total_sales": money.get("total_sales"),
+    }
+
+    # Many POS slips print no subtotal at all - receipt 11 goes straight from the
+    # item lines to TAX and TOTAL. Without a target the item sum cannot be checked
+    # and every row is discarded, so the subtotal implied by the total is offered
+    # as a fallback candidate.
+    total = money.get("total_amount")
+    if total is not None:
+        implied = round(
+            total - (money.get("tax_amount") or 0.0)
+            - (money.get("service_charge") or 0.0), 2
+        )
+        targets["total_amount"] = total
+        if implied > 0 and abs(implied - total) > 0.005:
+            targets["total_less_tax_and_charges"] = implied
+
+    best: ItemScan | None = None
+    for reading in bundle.all_readings:
+        scan = reconcile_items(parse_items(reading.lines), targets)
+        rank = (1 if scan.reconciled else 0, scan.count)
+        if best is None or rank > (1 if best.reconciled else 0, best.count):
+            best = scan
+        if scan.reconciled:
+            break  # an arithmetically consistent reading is good enough
+
+    return best or ItemScan()
+
+
+def _best_layout(
+    bundle: OcrBundle, locale: LocaleGuess, vat_registered: bool = True
+) -> tuple[LayoutScan, MoneyResult]:
     """Scan every pooled reading and keep the most productive money extraction.
 
     Ranked by: arithmetic reconciliation first, then how many distinct labels were
@@ -182,7 +240,7 @@ def _best_layout(bundle: OcrBundle, locale: LocaleGuess) -> tuple[LayoutScan, Mo
 
     for reading in [bundle.primary, *bundle.supporting]:
         scan = scan_layout(reading.lines)
-        money = resolve_money(scan, locale)
+        money = resolve_money(scan, locale, vat_registered)
         rank = (
             1 if money.reconciled else 0,
             scan.label_count,
@@ -193,7 +251,7 @@ def _best_layout(bundle: OcrBundle, locale: LocaleGuess) -> tuple[LayoutScan, Mo
 
     if best is None:  # pragma: no cover - bundle always has a primary
         empty = LayoutScan()
-        return empty, resolve_money(empty, locale)
+        return empty, resolve_money(empty, locale, vat_registered)
     return best[1], best[2]
 
 

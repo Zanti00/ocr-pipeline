@@ -160,6 +160,7 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
     from app.core.verification import verify
     from app.eval.compare import Outcome, classify, is_grounded
     from app.eval.groundtruth import FIELD_SPECS, Gate
+    from app.eval.items_score import ItemTally, render_items, score_items
     from app.eval.report import (
         empty_tallies, render_accuracy, render_fabrication,
     )
@@ -173,6 +174,7 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
     abstention_rows: list[tuple[str, bool, bool]] = []
     by_type: dict[str, list[tuple[str, Outcome]]] = {}
     confidence_rows: list[tuple[str, bool, float, bool, list[str]]] = []
+    item_tally = ItemTally()
     by_degradation: dict[str, list[tuple[str, Outcome]]] = {}
     by_template: dict[str, list[tuple[str, Outcome]]] = {}
 
@@ -250,6 +252,15 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
             *confidence_rows[row_index][:5], receipt_fields_correct,
         )
 
+        if "items" not in truth.unknown:
+            score_items(
+                item_tally,
+                image=truth.image,
+                expected=truth.expected_items,
+                produced=result.item_scan.payload() if result.item_scan else [],
+                reconciled=bool(result.item_scan and result.item_scan.reconciled),
+            )
+
         # Abstention is expected when the figures are unreadable. A receipt whose
         # arithmetic is deliberately inconsistent has a perfectly legible total,
         # so the correct behaviour there is to flag it, not to withhold it.
@@ -274,6 +285,7 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
         print(_render_by_type(by_degradation, title="BY DEGRADATION TIER"))
     if len(by_template) > 1:
         print(_render_by_type(by_template, title="BY TEMPLATE"))
+    print(render_items(item_tally))
     print(render_fabrication(populated, ungrounded_total))
     print(_render_abstention(abstention_rows))
     print(_render_routing(confidence_rows, SERMS_REVIEW_THRESHOLD))

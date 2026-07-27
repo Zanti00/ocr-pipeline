@@ -21,11 +21,17 @@ from dataclasses import dataclass, field
 
 from app.core.ocr_engine import Word
 
-# Amounts on receipts carry two decimal places. Requiring them rejects the
-# identifiers, quantities and OCR debris that bare-integer matching swept up:
-# '0015' from a form grid, '306.' from a truncated total, '640' from noise.
-MONEY_STRICT_RE = re.compile(r"^[^\d]{0,3}(\d{1,3}(?:[,.\s]\d{3})*[.,]\d{2})[^\d]{0,3}$")
-MONEY_FRAGMENT_RE = re.compile(r"^[.,]\d{2}[^\d]{0,2}$")
+# Amounts must carry a decimal point. Requiring one rejects the identifiers,
+# quantities and OCR debris that bare-integer matching swept up: '0015' from a form
+# grid, '306.' from a truncated total, '640' from noise.
+#
+# One decimal place is allowed as well as two. Plenty of POS systems print '$15.8'
+# rather than '$15.80', and demanding two digits meant such a receipt appeared to
+# contain no money at all - no items, no subtotal, no total.
+MONEY_STRICT_RE = re.compile(
+    r"^[^\d]{0,3}(\d{1,3}(?:[,.\s]\d{3})*[.,]\d{1,2})[^\d]{0,3}$"
+)
+MONEY_FRAGMENT_RE = re.compile(r"^[.,]\d{1,2}[^\d]{0,2}$")
 INTEGER_PART_RE = re.compile(r"^[^\d]{0,3}\d{1,7}$")
 
 # Longest match wins, so 'total amount due' beats 'total' and 'subtotal' is never
@@ -71,6 +77,17 @@ _NOISE_RE = re.compile("|".join(NOISE_LINE_PATTERNS), re.IGNORECASE)
 class MoneyToken:
     text: str
     word: Word
+    words: list[Word] = field(default_factory=list)
+    """Every word that formed this token.
+
+    Usually one, but two when OCR splits an amount ('$29' + ',99'). Callers that
+    need the rest of the line - item-name extraction - must exclude all of them,
+    since the reassembled token string no longer matches the raw text.
+    """
+
+    def __post_init__(self) -> None:
+        if not self.words:
+            self.words = [self.word]
 
     @property
     def center_y(self) -> float:
@@ -191,19 +208,22 @@ def _collect_money_tokens(lines: list[list[Word]]) -> list[MoneyToken]:
                 if INTEGER_PART_RE.match(text):
                     merged = f"{text}{line[index + 1].text.strip()}"
                     if _plausible_amount(merged):
-                        tokens.append(MoneyToken(text=merged, word=word))
+                        tokens.append(MoneyToken(
+                            text=merged, word=word, words=[word, line[index + 1]]
+                        ))
                     index += 2
                     continue
 
             if MONEY_STRICT_RE.match(text) and _plausible_amount(text):
-                tokens.append(MoneyToken(text=text, word=word))
+                tokens.append(MoneyToken(text=text, word=word, words=[word]))
             index += 1
     return tokens
 
 
 def _plausible_amount(token: str) -> bool:
+    # Two digits is the floor, so a single-decimal amount like '$1.8' still counts.
     digits = re.sub(r"\D", "", token)
-    return 3 <= len(digits) <= 9
+    return 2 <= len(digits) <= 9
 
 
 def _best_label(line_text: str) -> tuple[str, str] | None:

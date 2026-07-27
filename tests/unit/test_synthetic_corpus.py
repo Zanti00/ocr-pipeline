@@ -90,7 +90,12 @@ class TestGroundTruthDocuments:
         assert document["expected"]["total_amount"] == spec.total_amount
         assert document["expected"]["vendor_tax_id"] == spec.vendor_tax_id
         assert document["expected"]["transaction_date"] == spec.transaction_date.isoformat()
-        assert "items" in document["unknown"]
+        # Items ARE scored now: the generator knows every row exactly, so the
+        # corpus is the only place item accuracy can be measured at a useful sample
+        # size. tax_rate stays unknown because it is derived, not printed.
+        assert "items" not in document["unknown"]
+        assert "tax_rate" in document["unknown"]
+        assert len(document["expected_items"]) == len(spec.items)
 
     def test_customer_tax_id_is_recorded_as_a_trap(self):
         rng = random.Random(2)

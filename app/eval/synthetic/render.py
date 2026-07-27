@@ -138,6 +138,9 @@ def _render_form(spec: ReceiptSpec) -> Image.Image:
     canvas.pair("Nature of Service / Item", "Qty      Amount", delta=-3)
     for item in spec.items:
         canvas.pair(item.name, f"{item.quantity}     {_money(item.amount)}", delta=-3)
+        if item.description:
+            # Indented and unpriced, as receipts print continuation lines.
+            canvas.line(item.description, delta=-5, indent=48, gap=4)
     canvas.rule()
 
     if is_vat:
@@ -188,6 +191,8 @@ def _render_slip(spec: ReceiptSpec) -> Image.Image:
 
     for item in spec.items:
         canvas.pair(f"{item.quantity} {item.name[:22]}", _money(item.amount), delta=-3)
+        if item.description:
+            canvas.line(item.description[:34], delta=-5, indent=40, gap=4)
     canvas.rule()
 
     if spec.country == "PH":

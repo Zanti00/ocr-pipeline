@@ -128,8 +128,10 @@ def _ground_truth(spec: ReceiptSpec, tier: str, image_name: str) -> dict[str, An
     if spec.customer_name:
         not_expected["vendor_name"] = [spec.customer_name]
 
-    # tax_rate is derived rather than printed; item-level scoring is out of scope.
-    unknown = ["items", "tax_rate"]
+    # tax_rate is derived rather than printed. Items ARE scored now: the generator
+    # knows every row exactly, so it is the only place item accuracy can be
+    # measured at a useful sample size.
+    unknown = ["tax_rate"]
 
     notes = (
         f"Generated {spec.template} receipt, degradation '{tier}', "
@@ -160,8 +162,11 @@ def _ground_truth(spec: ReceiptSpec, tier: str, image_name: str) -> dict[str, An
         "expect_reconciliation_failure": spec.corrupt_arithmetic,
         "notes": notes,
         "expected": expected,
+        # expected_name folds any description line in, because a printed
+        # continuation belongs to the item above it and must not become a row.
         "expected_items": [
-            {"name": item.name, "quantity": item.quantity, "price": item.amount}
+            {"name": item.expected_name, "quantity": item.quantity,
+             "price": item.amount}
             for item in spec.items
         ],
         "not_expected_values": not_expected,

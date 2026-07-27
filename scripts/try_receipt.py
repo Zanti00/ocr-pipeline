@@ -66,7 +66,8 @@ def run(path: Path, as_json: bool, show_variants: bool, receipt_id: int) -> int:
         locale_certainty=result.locale.certainty if result.locale else 0.0,
     )
     payload = build_callback_payload(
-        receipt_id=receipt_id, fields=verification.fields, confidence=breakdown.score
+        receipt_id=receipt_id, fields=verification.fields, confidence=breakdown.score,
+        items=result.item_scan.payload() if result.item_scan else [],
     )
     elapsed = time.perf_counter() - started
 
@@ -106,9 +107,20 @@ def _report(path, bundle, result, verification, breakdown, payload, elapsed,
     print("\n  CALLBACK TO SERMS")
     for key, value in payload.model_dump().items():
         if key == "items":
-            print(f"    {key:<22}{len(value)} item(s)")
+            print(f"    {key:<22}{len(value)} row(s)")
+            for row in value:
+                print(f"      qty {row['quantity']:<4}{row['price']:>10.2f}  "
+                      f"{row['name'][:52]}")
         else:
             print(f"    {key:<22}{value}")
+
+    if result.item_scan:
+        print("\n  ITEMS")
+        print(f"    {'rows parsed':<22}{result.item_scan.count}")
+        print(f"    {'reconciled':<22}{result.item_scan.reconciled}")
+        print(f"    {'price basis':<22}{result.item_scan.price_basis}")
+        for note in result.item_scan.notes:
+            print(f"    {note}")
 
     print("\n  INTERNAL ONLY (stored, not transmitted)")
     for key in ("country", "currency", "net_sales", "total_sales", "service_charge",
