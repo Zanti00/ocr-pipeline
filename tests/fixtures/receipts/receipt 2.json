@@ -1,0 +1,29 @@
+{
+  "image": "receipt 2.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified_psm6",
+  "expect_manual_review": false,
+  "notes": "Thermal POS receipt. Amounts are INVISIBLE under Tesseract's default PSM 3 and only appear with --psm 6, which is the core evidence for the multi-variant selection design. The '(B)' suffix and Yayasan Complex locate this in BRUNEI, not Malaysia (Sdn Bhd is used in both). Currency symbol is not legible in OCR text so currency is left unknown rather than guessed. No tax line is printed. VENDOR NAME IS AMBIGUOUS BY NATURE: the header carries the franchisee's registered entity ('Ent rek (B) Sdn.Bhd.'), the brand ('Jollibee') and the branch trade name ('Jollibee Yayasan Complex'). All three are defensible answers to 'who issued this receipt', so all three are accepted rather than picking one and calling the others wrong.",
+  "expected": {
+    "vendor_name": "Jollibee Yayasan Complex",
+    "country": "BN",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": "2014-02-18",
+    "net_sales": 3.70,
+    "tax_amount": null,
+    "tax_type": null,
+    "total_sales": 3.70,
+    "service_charge": null,
+    "total_amount": 3.70,
+    "vat_classification": null,
+    "invoice_number": "20052",
+    "expense_category": "Meals"
+  },
+  "also_acceptable": {
+    "vendor_name": ["Ent rek (B) Sdn.Bhd.", "Entrek (B) Sdn. Bhd.", "Jollibee"]
+  },
+  "unknown": ["currency", "tax_rate", "items"]
+}

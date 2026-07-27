@@ -1,0 +1,26 @@
+{
+  "image": "receipt 4.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "handwritten_form",
+  "truth_source": "ocr_text_partial",
+  "expect_manual_review": true,
+  "notes": "PH NON-VAT sales invoice, hand-filled. Header is machine printed so vendor name and TIN are recoverable; every hand-written value is not. Tesseract reads the vendor as 'QKYECEN' (O misread as Q). Document states 'NOT VALID FOR CLAIMING INPUT TAXES', confirming non-vat. A customer TIN is hand-written in the 'TIN:' field but is illegible ('D- 610 -AY -i/4~ HRMS') - it must not be picked up as the vendor tax id.",
+  "expected": {
+    "vendor_name": "Okyecen Consumer Goods Wholesaling",
+    "country": "PH",
+    "currency": "PHP",
+    "vendor_tax_id": "403-205-152-000",
+    "vendor_tax_id_type": "PH_TIN",
+    "tax_amount": null,
+    "tax_type": null,
+    "vat_classification": "non-vat"
+  },
+  "not_expected_values": {
+    "vendor_name": ["Jade B. Parativo"]
+  },
+  "unknown": [
+    "transaction_date", "net_sales", "total_sales", "service_charge",
+    "total_amount", "tax_rate", "invoice_number", "expense_category", "items"
+  ]
+}

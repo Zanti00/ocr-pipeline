@@ -1,0 +1,19 @@
+{
+  "image": "receipt 9.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "handwritten_form",
+  "truth_source": "ocr_text_partial",
+  "expect_manual_review": true,
+  "notes": "Generic hand-written cash receipt booklet, almost entirely illegible to Tesseract. No vendor header, no tax id, no BIR markings. Text fragments suggest a rent payment with the amount written in words ('Ore Weendret' = One Hundred...). Every field is unverifiable, so this receipt scores ONLY on abstention: correct behaviour is all-null output with a sub-0.80 confidence and a manual-review flag. Any populated money field here is a fabrication by definition. No document border in frame, so perspective warp must be declined.",
+  "expected": {
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "vat_classification": null
+  },
+  "unknown": [
+    "vendor_name", "country", "currency", "transaction_date", "net_sales",
+    "tax_amount", "tax_type", "tax_rate", "total_sales", "service_charge",
+    "total_amount", "invoice_number", "expense_category", "items"
+  ]
+}

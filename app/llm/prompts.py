@@ -1,22 +1,61 @@
-RECEIPT_EXTRACTION_PROMPT = """
-You are an AI assistant specialized in extracting structured data from raw OCR text of receipts.
-Your task is to parse the following OCR text and extract the required fields as a JSON object.
+"""Prompts for the narrowed language-model role.
 
-Extract the following fields:
-- vendor_name: The name of the vendor or store.
-- transaction_date: The date of the transaction in YYYY-MM-DD format.
-- total_amount: The total amount of the receipt as a number.
-- vat_amount: The VAT (Value Added Tax) amount as a number, if present.
-- tin: The Tax Identification Number (TIN) of the vendor, if present.
-- invoice_number: The receipt or invoice number.
-- expense_category: Suggest a category for the expense (e.g., "Meals & Entertainment", "Travel", "Office Supplies").
-- items: A list of items purchased. Each item should have:
-  - name: The name of the item.
-  - quantity: The quantity purchased (integer).
-  - price: The total price for that item (number).
+The model no longer reads the receipt. Amounts, tax ids, dates and invoice numbers
+are extracted deterministically from OCR geometry, because asking a 1.5B model to
+transcribe digits is where fabricated totals came from.
 
-If a field cannot be found, set its value to null.
-Only return the JSON object, nothing else.
+What remains is selection: choose one option from a closed list, or return null.
+An answer outside the list is rejected by the caller, so a wrong answer is bounded
+and a hallucinated one is impossible.
+"""
+
+VENDOR_SELECTION_PROMPT = """You are given candidate text lines from the printed header of a receipt.
+Choose which line is the NAME OF THE BUSINESS that issued the receipt.
+
+Rules:
+- You MUST choose exactly one option from the CANDIDATES list, copied character for character.
+- Do NOT invent, correct, complete or reformat a name.
+- Do NOT choose a street address, phone number, tax number, or a person acting as proprietor.
+- The DO_NOT_CHOOSE list contains the customer or payer. Never select those.
+- If no candidate is the issuing business, return null.
+
+Respond with JSON only: {{"vendor_name": "<exact candidate or null>"}}
+
+CANDIDATES:
+{candidates}
+
+DO_NOT_CHOOSE:
+{excluded}
+"""
+
+CATEGORY_TIEBREAK_PROMPT = """Classify a business expense into exactly one category.
+
+Rules:
+- Choose ONLY from the two OPTIONS below.
+- Respond with JSON only: {{"category": "<one of the options>"}}
+
+OPTIONS: {option_a} | {option_b}
+
+RECEIPT DETAILS:
+{details}
+"""
+
+# Retained for the legacy single-shot path. Kept strict about abstention so that,
+# if it is ever used, a missing value comes back as null rather than a guess.
+RECEIPT_EXTRACTION_PROMPT = """Extract structured data from the OCR text of a receipt.
+
+CRITICAL RULES:
+- Copy values EXACTLY as they appear in the OCR text. Never reformat or compute.
+- If a value is not literally present in the text, return null for it.
+- Never guess an amount, a date, or a tax number. A null is correct; a guess is not.
+
+Fields: vendor_name, transaction_date (YYYY-MM-DD), total_amount, vat_amount, tin,
+invoice_number, expense_category, items[{{name, quantity, price}}].
+
+expense_category must be exactly one of:
+Meals, Travel, Supplies, Accommodation, Transportation, Others
+
+Return the JSON object only.
 
 OCR TEXT:
 {ocr_text}

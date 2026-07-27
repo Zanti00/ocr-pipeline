@@ -1,33 +1,120 @@
-import httpx
 import json
-from app.llm.base import LLMProvider
-from app.llm.prompts import RECEIPT_EXTRACTION_PROMPT
+import logging
+from typing import Any
+
+import httpx
+
 from app.config import settings
+from app.llm.base import LLMProvider
+from app.llm.prompts import (
+    CATEGORY_TIEBREAK_PROMPT,
+    RECEIPT_EXTRACTION_PROMPT,
+    VENDOR_SELECTION_PROMPT,
+)
+
+logger = logging.getLogger(__name__)
+
+# Selection answers are a few tokens. Capping output keeps CPU inference short and
+# stops a small model from rambling past valid JSON.
+SELECTION_TOKEN_LIMIT = 64
+EXTRACTION_TOKEN_LIMIT = 768
+
 
 class OllamaProvider(LLMProvider):
-    def __init__(self):
-        self.base_url = settings.ollama_base_url
+    def __init__(self) -> None:
+        self.base_url = settings.ollama_base_url.rstrip("/")
         self.model = settings.ollama_model
 
-    async def extract_receipt_fields(self, ocr_text: str) -> dict:
-        prompt = RECEIPT_EXTRACTION_PROMPT.format(ocr_text=ocr_text)
-        
+    async def _generate(
+        self, prompt: str, token_limit: int, timeout: float = 120.0
+    ) -> dict[str, Any] | None:
+        """Call Ollama and parse JSON, with one repair attempt.
+
+        A single stray token used to fail the whole job: the old implementation let
+        ``json.loads`` raise straight through into a failed callback, losing an
+        otherwise good extraction.
+        """
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
             "format": "json",
             "options": {
-                "temperature": 0.0
-            }
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "num_predict": token_limit,
+            },
         }
-        
+
         async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(f"{self.base_url}/api/generate", json=payload, timeout=120.0)
-                response.raise_for_status()
-                data = response.json()
-                result_json = data.get("response", "{}")
-                return json.loads(result_json)
-            except Exception as e:
-                raise RuntimeError(f"Ollama extraction failed: {str(e)}")
+            for attempt in (1, 2):
+                try:
+                    response = await client.post(
+                        f"{self.base_url}/api/generate", json=payload, timeout=timeout
+                    )
+                    response.raise_for_status()
+                    raw = response.json().get("response", "")
+                    return self._parse_json(raw)
+                except (json.JSONDecodeError, ValueError) as exc:
+                    logger.warning("Ollama returned unparseable JSON (attempt %s): %s",
+                                   attempt, exc)
+                    if attempt == 2:
+                        return None
+                except httpx.HTTPError as exc:
+                    logger.warning("Ollama request failed (attempt %s): %s", attempt, exc)
+                    if attempt == 2:
+                        return None
+        return None
+
+    @staticmethod
+    def _parse_json(raw: str) -> dict[str, Any]:
+        text = (raw or "").strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            # Salvage the first JSON object if the model wrapped it in prose.
+            start, end = text.find("{"), text.rfind("}")
+            if start == -1 or end <= start:
+                raise
+            parsed = json.loads(text[start:end + 1])
+        if not isinstance(parsed, dict):
+            raise ValueError(f"Expected a JSON object, got {type(parsed).__name__}")
+        return parsed
+
+    async def extract_receipt_fields(self, ocr_text: str) -> dict:
+        result = await self._generate(
+            RECEIPT_EXTRACTION_PROMPT.format(ocr_text=ocr_text),
+            token_limit=EXTRACTION_TOKEN_LIMIT,
+        )
+        if result is None:
+            raise RuntimeError("Ollama extraction failed after retry")
+        return result
+
+    async def select_vendor_name(
+        self, candidates: list[str], excluded: list[str] | None = None
+    ) -> str | None:
+        if not candidates:
+            return None
+        prompt = VENDOR_SELECTION_PROMPT.format(
+            candidates="\n".join(f"- {line}" for line in candidates),
+            excluded="\n".join(f"- {line}" for line in (excluded or [])) or "- (none)",
+        )
+        result = await self._generate(prompt, token_limit=SELECTION_TOKEN_LIMIT, timeout=60.0)
+        if not result:
+            return None
+        choice = result.get("vendor_name")
+        return str(choice).strip() if choice else None
+
+    async def choose_category(self, details: str, options: tuple[str, str]) -> str | None:
+        prompt = CATEGORY_TIEBREAK_PROMPT.format(
+            option_a=options[0], option_b=options[1], details=details[:1200]
+        )
+        result = await self._generate(prompt, token_limit=SELECTION_TOKEN_LIMIT, timeout=60.0)
+        if not result:
+            return None
+        choice = result.get("category")
+        if not choice:
+            return None
+        picked = str(choice).strip()
+        # Reject anything outside the two options offered.
+        return picked if picked in options else None
