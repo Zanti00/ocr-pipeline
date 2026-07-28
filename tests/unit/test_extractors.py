@@ -76,6 +76,34 @@ class TestDateSelection:
     def test_future_dates_are_rejected(self):
         assert find_dates(["Date: 01/01/2099"]) == []
 
+    def test_ordinal_date_formats(self):
+        best1 = find_dates(["Date: May 24th, 2025"])[0]
+        assert best1.value.isoformat() == "2025-05-24"
+        best2 = find_dates(["Date: 24th May 2025"])[0]
+        assert best2.value.isoformat() == "2025-05-24"
+
+    def test_timestamp_format(self):
+        best = find_dates(["Txn Date: 2025-05-24 14:30:00"])[0]
+        assert best.value.isoformat() == "2025-05-24"
+
+    def test_compact_date_format_with_label(self):
+        best = find_dates(["Date: 20250524"])[0]
+        assert best.value.isoformat() == "2025-05-24"
+
+    def test_spaced_date_format_with_label(self):
+        best = find_dates(["dt: 2025 05 24"])[0]
+        assert best.value.isoformat() == "2025-05-24"
+
+    def test_compact_date_without_label_is_ignored(self):
+        candidates = find_dates(["Reference: 20250524"])
+        assert candidates == []
+
+    def test_extended_date_labels_boost_score(self):
+        c1 = find_dates(["Txn Date: 05/24/2025"])[0]
+        assert c1.score > 2.0
+        c2 = find_dates(["Billing Date: 05/24/2025"])[0]
+        assert c2.score > 2.0
+
 
 class TestInvoiceNumber:
     def test_labelled_invoice_number(self):

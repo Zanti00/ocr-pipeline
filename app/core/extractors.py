@@ -164,11 +164,11 @@ DATE_PATTERNS_DAY_FIRST: tuple[tuple[str, tuple[str, ...]], ...] = (
 MONTH_FIRST_COUNTRIES = frozenset({"US", "PH"})
 
 MONTH_NAME_RE = re.compile(
-    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\s*,?\s*(\d{4})\b",
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(\d{4})\b",
     re.IGNORECASE,
 )
 DAY_MONTH_NAME_RE = re.compile(
-    r"\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{2,4})\b",
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{2,4})\b",
     re.IGNORECASE,
 )
 
@@ -177,7 +177,18 @@ _MONTH_NUM = {
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 
-DATE_LABELS = ("date", "issued on", "transaction", "invoice date", "or date")
+DATE_LABELS = (
+    "date", "issued on", "transaction", "invoice date", "or date",
+    "dt:", "dated", "txn date", "purchase date", "sale date",
+    "receipt date", "billing date",
+)
+
+COMPACT_DATE_RE = re.compile(
+    r"\b(\d{4})(\d{2})(\d{2})\b|\b(\d{2})(\d{2})(\d{4})\b"
+)
+SPACED_DATE_RE = re.compile(
+    r"\b(\d{4})\s+(\d{1,2})\s+(\d{1,2})\b|\b(\d{1,2})\s+(\d{1,2})\s+(\d{4})\b"
+)
 
 # Dates in these contexts belong to the payment terminal or the print shop, not
 # the transaction. Receipt 1 carries a card-terminal '11/20/2019' that sits right
@@ -220,7 +231,9 @@ def find_dates(
     candidates: list[DateCandidate] = []
 
     for index, line_text in enumerate(lines):
-        for parsed, raw in _parse_line_dates(line_text, month_first=month_first):
+        lowered = line_text.casefold()
+        has_label = any(label in lowered for label in DATE_LABELS)
+        for parsed, raw in _parse_line_dates(line_text, month_first=month_first, has_date_label=has_label):
             if not (date(1990, 1, 1) <= parsed <= today):
                 continue  # reject impossible / future transaction dates
             candidates.append(
@@ -242,7 +255,7 @@ def find_dates(
 
 
 def _parse_line_dates(
-    line_text: str, month_first: bool = True
+    line_text: str, month_first: bool = True, has_date_label: bool = False
 ) -> list[tuple[date, str]]:
     found: list[tuple[date, str]] = []
 
@@ -268,6 +281,29 @@ def _parse_line_dates(
             if month > 12 and day <= 12:
                 month, day = day, month  # impossible month: the order was reversed
             found.append((_safe_date(year, month, day), match.group(0)))
+
+    if has_date_label:
+        for match in COMPACT_DATE_RE.finditer(line_text):
+            g = match.groups()
+            if g[0]:
+                y, m, d = int(g[0]), int(g[1]), int(g[2])
+            else:
+                y = int(g[5])
+                m, d = (int(g[3]), int(g[4])) if month_first else (int(g[4]), int(g[3]))
+            dt = _safe_date(y, m, d)
+            if dt:
+                found.append((dt, match.group(0)))
+
+        for match in SPACED_DATE_RE.finditer(line_text):
+            g = match.groups()
+            if g[0]:
+                y, m, d = int(g[0]), int(g[1]), int(g[2])
+            else:
+                y = int(g[5])
+                m, d = (int(g[3]), int(g[4])) if month_first else (int(g[4]), int(g[3]))
+            dt = _safe_date(y, m, d)
+            if dt:
+                found.append((dt, match.group(0)))
 
     return [(value, raw) for value, raw in found if value is not None]
 
