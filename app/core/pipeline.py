@@ -167,14 +167,16 @@ async def _extract_with_assists(bundle: OcrBundle) -> Extraction:
     baseline = extract(bundle)
 
     vendor_choice = await _ask_model_for_vendor(baseline)
+    location_choice = await _ask_model_for_location(baseline)
     embedder = _embedder()
 
-    if vendor_choice is None and embedder is None:
+    if vendor_choice is None and location_choice is None and embedder is None:
         return baseline
 
     return extract(
         bundle,
         llm_vendor_choice=vendor_choice,
+        llm_location_choice=location_choice,
         embedder=embedder,
         category_tiebreaker=None,
     )
@@ -192,6 +194,19 @@ async def _ask_model_for_vendor(baseline: Extraction) -> str | None:
     except Exception as exc:
         logger.warning("Vendor selection unavailable, keeping deterministic pick: %s", exc)
         return None
+
+
+async def _ask_model_for_location(baseline: Extraction) -> str | None:
+    candidates = baseline.address_candidates
+    if len(candidates) < 2:
+        return None
+    try:
+        provider = create_provider()
+        return await provider.select_location(candidates)
+    except Exception as exc:
+        logger.warning("Location selection unavailable, keeping deterministic pick: %s", exc)
+        return None
+
 
 
 def _embedder():

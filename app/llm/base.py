@@ -24,6 +24,14 @@ class LLMProvider(ABC):
         """
         return None
 
+    async def select_location(self, candidates: list[str]) -> str | None:
+        """Pick the business location/address from a closed candidate list.
+
+        Returning ``None`` means no opinion; caller keeps deterministic result.
+        """
+        return None
+
     async def choose_category(self, details: str, options: tuple[str, str]) -> str | None:
         """Break a tie between exactly two candidate categories."""
         return None
+

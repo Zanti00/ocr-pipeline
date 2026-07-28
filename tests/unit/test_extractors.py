@@ -5,8 +5,8 @@ than invented, so a regression here means a receipt that used to work has broken
 """
 
 from app.core.extractors import (
-    find_dates, find_invoice_number, find_tax_ids, format_tax_id,
-    select_vendor_tax_id,
+    find_address_candidates, find_dates, find_invoice_number, find_tax_ids,
+    format_tax_id, select_vendor_tax_id,
 )
 
 
@@ -120,3 +120,16 @@ class TestInvoiceNumber:
             ["DAU PRINTERS Printers Accreditation No. 038MP20140000000045"]
         )
         assert number is None
+
+
+class TestAddressCandidates:
+    def test_extracts_address_candidate_from_lines(self):
+        line_sets = [[
+            ("Jollibee Food Corp", 95.0),
+            ("Ayala Center, Makati City, Metro Manila, Philippines", 90.0),
+            ("TIN: 000-111-222-000", 85.0),
+        ]]
+        candidates = find_address_candidates(line_sets)
+        assert len(candidates) >= 1
+        assert "Makati City" in candidates[0]
+

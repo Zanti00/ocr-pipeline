@@ -28,6 +28,22 @@ DO_NOT_CHOOSE:
 {excluded}
 """
 
+LOCATION_SELECTION_PROMPT = """You are given candidate text lines from a receipt header.
+Choose which line best describes the LOCATION (city/area/address) of the business.
+
+Rules:
+- Choose EXACTLY one option from CANDIDATES, copied character for character.
+- Prefer lines containing city, municipality, barangay, province or country names.
+- Do NOT choose the business name, phone number, or tax ID.
+- If no candidate is a location, return null.
+
+Respond with JSON only: {{"location": "<exact candidate or null>"}}
+
+CANDIDATES:
+{candidates}
+"""
+
+
 CATEGORY_TIEBREAK_PROMPT = """Classify a business expense into exactly one category.
 
 Rules:

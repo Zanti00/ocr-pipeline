@@ -8,9 +8,11 @@ from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.prompts import (
     CATEGORY_TIEBREAK_PROMPT,
+    LOCATION_SELECTION_PROMPT,
     RECEIPT_EXTRACTION_PROMPT,
     VENDOR_SELECTION_PROMPT,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,18 @@ class OllamaProvider(LLMProvider):
         if not result:
             return None
         choice = result.get("vendor_name")
+        return str(choice).strip() if choice else None
+
+    async def select_location(self, candidates: list[str]) -> str | None:
+        if not candidates:
+            return None
+        prompt = LOCATION_SELECTION_PROMPT.format(
+            candidates="\n".join(f"- {line}" for line in candidates)
+        )
+        result = await self._generate(prompt, token_limit=SELECTION_TOKEN_LIMIT, timeout=60.0)
+        if not result:
+            return None
+        choice = result.get("location")
         return str(choice).strip() if choice else None
 
     async def choose_category(self, details: str, options: tuple[str, str]) -> str | None:

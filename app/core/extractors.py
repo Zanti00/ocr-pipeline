@@ -476,6 +476,73 @@ def find_vendor_candidates(
     return result
 
 
+ADDRESS_KEYWORDS = (
+    " st.", " st ", "street", " ave", "avenue", "road", " rd", "brgy", "barangay",
+    "city", "unit ", "blk", "block", "suite", "floor", " flr", "bldg", "building",
+    "district", "province", "philippines", "zip", "p.o. box", "highway", "hwy",
+    "subdivision", "subd", "drive", "dr.", "blvd", "boulevard", "plaza", "center",
+    "centre", "mall", "tower", "metro", "manila", "makati", "quezon", "taguig", "pasig",
+    "mandaluyong", "cebu", "davao", "pasay", "paranaque",
+)
+
+ADDRESS_PATTERNS = re.compile(
+    r"\b\d+\s*/\s*[a-z]\b"
+    r"|\b[a-z]?\d+\s*(?:st|nd|rd|th)\s+(?:floor|flr)\b"
+    r"|\bcor\.?\s"
+    r"|\b(?:blvd|ave|st|rd|hwy|lot|blk|brgy|bldg|unit|suite|rm)\b\.?"
+    r"|\b\d{4,5}\b.*\b(?:city|manila|philippines)\b",
+    re.IGNORECASE,
+)
+
+
+def find_address_candidates(
+    line_sets: list[list[tuple[str, float]]], header_lines: int = 15
+) -> list[str]:
+    """Collect plausible location/address candidate lines from printed receipt headers."""
+    candidates: dict[str, CandidateMeta] = {}
+
+    for lines in line_sets:
+        for index, (line_text, confidence) in enumerate(lines[:header_lines]):
+            stripped = line_text.strip()
+            lowered = stripped.casefold()
+            if any(bad in lowered for bad in VENDOR_NAME_EXCLUSIONS):
+                continue
+            if VENDOR_NAME_EXCLUSION_WORDS.search(stripped):
+                continue
+            if DOCUMENT_TITLE_RE.search(stripped):
+                continue
+            if _is_column_heading(stripped):
+                continue
+            if not looks_like_words(stripped):
+                continue
+
+            is_address = any(kw in lowered for kw in ADDRESS_KEYWORDS) or bool(ADDRESS_PATTERNS.search(stripped))
+            if not is_address:
+                continue
+
+            existing = candidates.get(stripped)
+            if existing is None:
+                candidates[stripped] = CandidateMeta(index=index, confidence=confidence)
+            else:
+                existing.index = min(existing.index, index)
+                existing.confidence = max(existing.confidence, confidence)
+                existing.occurrences += 1
+
+    ranked: list[tuple[str, float]] = []
+    for text, info in candidates.items():
+        score = 2.0 - (info.index * 0.15)
+        score += 1.5 * max(0.0, min(info.confidence, 1.0))
+        score += 0.5 * min(info.occurrences - 1, 3)
+        lowered = text.casefold()
+        if "philippines" in lowered or "city" in lowered or "metro" in lowered:
+            score += 1.0
+        ranked.append((text, score))
+
+    ranked.sort(key=lambda pair: -pair[1])
+    return [text for text, _ in ranked]
+
+
+
 def _is_column_heading(line: str) -> bool:
     """Is every word on this line part of a table heading?
 

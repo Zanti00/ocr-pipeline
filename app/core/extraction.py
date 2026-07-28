@@ -18,6 +18,7 @@ from app.core.extractors import (
     DateCandidate,
     TaxIdCandidate,
     VendorCandidates,
+    find_address_candidates,
     find_dates,
     find_invoice_number,
     find_tax_ids,
@@ -46,6 +47,7 @@ class Extraction:
     tax_id_candidates: list[TaxIdCandidate] = field(default_factory=list)
     date_candidates: list[DateCandidate] = field(default_factory=list)
     vendor_candidates: VendorCandidates = field(default_factory=VendorCandidates)
+    address_candidates: list[str] = field(default_factory=list)
     vendor_choice: VendorChoice | None = None
     category_choice: CategoryChoice | None = None
     item_scan: ItemScan | None = None
@@ -64,12 +66,13 @@ def extract(
     bundle: OcrBundle,
     *,
     llm_vendor_choice: str | None = None,
+    llm_location_choice: str | None = None,
     embedder: Embedder | None = None,
     category_tiebreaker: Tiebreaker | None = None,
 ) -> Extraction:
     """Run extraction over a pooled OCR reading.
 
-    All three optional arguments are upgrades, not requirements. With none of them
+    All optional arguments are upgrades, not requirements. With none of them
     supplied the pipeline is fully deterministic and offline, which is also how the
     evaluation harness runs it.
     """
@@ -79,13 +82,6 @@ def extract(
 
     locale = detect_locale(combined)
 
-    # Money pairing is geometric, so the reading that best preserves row structure
-    # wins - not necessarily the one with the best anchor score. Block-oriented
-    # segmentation keeps a label and its figure on one row, while sparse-text mode
-    # scatters them, so every pooled reading is scanned and the most productive
-    # one is kept.
-    # VAT registration is read from the printed header, before any money is
-    # resolved, because it decides whether VAT may be derived at all.
     vat_registered = classify_tax(combined, locale, None) == "vat"
     layout, money = _best_layout(bundle, locale, vat_registered)
 
@@ -96,13 +92,10 @@ def extract(
     best_date = dates[0] if dates and dates[0].score > 0 else None
 
     invoice_number, invoice_line = find_invoice_number(pooled_lines)
-    vendors = find_vendor_candidates(
-        [_lines_with_confidence(reading)
-         for reading in [bundle.primary, *bundle.supporting]]
-    )
+    readings_conf = [_lines_with_confidence(reading) for reading in [bundle.primary, *bundle.supporting]]
+    vendors = find_vendor_candidates(readings_conf)
+    address_candidates = find_address_candidates(readings_conf)
 
-    # Deterministic ranking runs first and always. An LLM selection, when one is
-    # supplied, may only reorder within this shortlist - never add to it.
     vendor_choice = select_vendor_name(
         vendors.lines, vendors.customer_names,
         llm_choice=llm_vendor_choice, meta=vendors.meta,
@@ -114,6 +107,12 @@ def extract(
         tiebreaker=category_tiebreaker,
     )
 
+    location = None
+    if llm_location_choice and llm_location_choice in address_candidates:
+        location = llm_location_choice
+    elif address_candidates:
+        location = address_candidates[0]
+
     extraction = Extraction(
         locale=locale,
         money=money,
@@ -121,6 +120,7 @@ def extract(
         tax_id_candidates=tax_ids,
         date_candidates=dates,
         vendor_candidates=vendors,
+        address_candidates=address_candidates,
         lines=pooled_lines,
     )
 
@@ -146,12 +146,16 @@ def extract(
         "invoice_number": invoice_number,
         "vendor_name": vendor_choice.name,
         "expense_category": category.category,
+        "location": location,
     }
     extraction.vendor_choice = vendor_choice
     extraction.category_choice = category
     extraction.item_scan = item_scan
 
     extraction.evidence.update(money.evidence)
+    if location:
+        extraction.evidence["location"] = location
+
     if vendor_tax:
         extraction.evidence["vendor_tax_id"] = (
             f"role={vendor_tax.role} line={vendor_tax.line_index} "

@@ -72,6 +72,7 @@ class OcrCallbackPayload(BaseModel):
     vat_classification: Optional[str] = None
     currency: Optional[str] = Field(default=None, max_length=3)
     expense_category: Optional[str] = None
+    location: Optional[str] = Field(default=None, max_length=255)
     ocr_confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
     items: List[ReceiptItem] = []
     status: Optional[str] = None
@@ -108,7 +109,7 @@ class OcrCallbackPayload(BaseModel):
     def restrict_category(cls, value: Optional[str]) -> Optional[str]:
         return coerce_category(value) if value else None
 
-    @field_validator("vendor_name", "tin", "invoice_number", mode="before")
+    @field_validator("vendor_name", "tin", "invoice_number", "location", mode="before")
     @classmethod
     def blank_to_none(cls, value: Any) -> Any:
         if value is None:
@@ -142,10 +143,12 @@ def build_callback_payload(
         vat_classification=fields.get("vat_classification"),
         currency=fields.get("currency"),
         expense_category=fields.get("expense_category"),
+        location=fields.get("location"),
         ocr_confidence_score=max(0.0, min(float(confidence), 1.0)),
         items=_valid_items(items or []),
         status=status,
     )
+
 
 
 def _valid_items(raw_items: list[dict[str, Any]]) -> list[ReceiptItem]:

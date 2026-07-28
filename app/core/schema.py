@@ -38,6 +38,7 @@ FIELD_KINDS: dict[str, FieldKind] = {
     "vat_classification": FieldKind.EXACT,
     "invoice_number": FieldKind.EXACT,
     "expense_category": FieldKind.EXACT,
+    "location": FieldKind.FUZZY_TEXT,
 }
 
 MONEY_FIELDS: tuple[str, ...] = tuple(
@@ -65,4 +66,6 @@ DEFAULT_EXPENSE_CATEGORY = "Others"
 CALLBACK_FIELDS: tuple[str, ...] = (
     "vendor_name", "transaction_date", "total_amount", "vat_amount", "tin",
     "invoice_number", "vat_classification", "currency", "expense_category", "items",
+    "location",
 )
+
