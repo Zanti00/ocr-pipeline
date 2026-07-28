@@ -5,6 +5,13 @@ from pydantic import BaseModel, Field, field_validator
 from app.core.schema import EXPENSE_CATEGORIES
 from app.core.verification import coerce_category
 
+# ISO 4217 codes the pipeline and SERMS both understand.
+# Mirrors ``COUNTRY_CURRENCY`` in ``app.core.locale`` so both sides stay in sync.
+# Any currency outside this set is coerced to None rather than 422-ing the callback.
+SUPPORTED_CURRENCIES: frozenset[str] = frozenset({
+    "PHP", "USD", "BND", "MYR", "SGD", "JPY", "HKD", "THB", "AUD", "GBP", "EUR",
+})
+
 
 class OcrProcessRequest(BaseModel):
     receipt_id: int
@@ -63,6 +70,7 @@ class OcrCallbackPayload(BaseModel):
     tin: Optional[str] = Field(default=None, max_length=255)
     invoice_number: Optional[str] = Field(default=None, max_length=255)
     vat_classification: Optional[str] = None
+    currency: Optional[str] = Field(default=None, max_length=3)
     expense_category: Optional[str] = None
     ocr_confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
     items: List[ReceiptItem] = []
@@ -79,6 +87,21 @@ class OcrCallbackPayload(BaseModel):
         null. Non-PH tax semantics are carried internally by ``tax_type`` instead.
         """
         return value if value in ("vat", "non-vat") else None
+
+    @field_validator("currency")
+    @classmethod
+    def restrict_currency(cls, value: Optional[str]) -> Optional[str]:
+        """Coerce unrecognised currency codes to None.
+
+        A code outside SUPPORTED_CURRENCIES would be stored as an uncontrolled
+        string in SERMS and silently ignored rather than 422-ing the whole callback.
+        OCR detection already limits output to the known set, so this is a safety
+        net for edge cases rather than an expected path.
+        """
+        if value is None:
+            return None
+        upper = value.strip().upper()
+        return upper if upper in SUPPORTED_CURRENCIES else None
 
     @field_validator("expense_category")
     @classmethod
@@ -117,6 +140,7 @@ def build_callback_payload(
         tin=fields.get("vendor_tax_id"),
         invoice_number=fields.get("invoice_number"),
         vat_classification=fields.get("vat_classification"),
+        currency=fields.get("currency"),
         expense_category=fields.get("expense_category"),
         ocr_confidence_score=max(0.0, min(float(confidence), 1.0)),
         items=_valid_items(items or []),
@@ -141,4 +165,5 @@ def _valid_items(raw_items: list[dict[str, Any]]) -> list[ReceiptItem]:
 __all__ = [
     "OcrProcessRequest", "OcrProcessResponse", "ReceiptItem",
     "OcrCallbackPayload", "build_callback_payload", "EXPENSE_CATEGORIES",
+    "SUPPORTED_CURRENCIES",
 ]

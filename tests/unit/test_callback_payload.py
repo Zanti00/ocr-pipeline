@@ -37,8 +37,14 @@ class TestFieldMapping:
         # SERMS drops undeclared keys silently, so they are persisted our side.
         payload = build_callback_payload(42, FIELDS, confidence=0.91)
         transmitted = payload.model_dump()
-        for internal in ("net_sales", "service_charge", "country", "currency"):
+        # net_sales and service_charge are internal breakdown fields, not callback fields.
+        for internal in ("net_sales", "service_charge", "country"):
             assert internal not in transmitted
+
+    def test_currency_is_now_transmitted(self):
+        # currency is in CALLBACK_FIELDS since the locale-propagation change.
+        payload = build_callback_payload(42, FIELDS, confidence=0.91)
+        assert payload.currency == "PHP"
 
 
 class TestVatClassification:
@@ -53,6 +59,28 @@ class TestVatClassification:
         # validates in:vat,non-vat and would reject the whole callback.
         payload = OcrCallbackPayload(receipt_id=1, vat_classification="not_applicable")
         assert payload.vat_classification is None
+
+
+class TestCurrency:
+    def test_known_codes_pass_through(self):
+        for code in ("PHP", "USD", "JPY", "EUR", "GBP", "SGD"):
+            payload = OcrCallbackPayload(receipt_id=1, currency=code)
+            assert payload.currency == code
+
+    def test_unknown_code_becomes_none_rather_than_422(self):
+        # An unexpected string must not 422 the whole callback.
+        payload = OcrCallbackPayload(receipt_id=1, currency="XYZ")
+        assert payload.currency is None
+
+    def test_none_passthrough(self):
+        # Locale detection can legitimately return None (unresolved locale).
+        payload = OcrCallbackPayload(receipt_id=1, currency=None)
+        assert payload.currency is None
+
+    def test_lowercase_code_is_normalised(self):
+        # Defensive: normalise lowercase input even though OCR always emits uppercase.
+        payload = OcrCallbackPayload(receipt_id=1, currency="usd")
+        assert payload.currency == "USD"
 
 
 class TestItemQuantityClamping:

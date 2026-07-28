@@ -64,5 +64,5 @@ DEFAULT_EXPENSE_CATEGORY = "Others"
 # only - Laravel's validated() silently drops undeclared keys.
 CALLBACK_FIELDS: tuple[str, ...] = (
     "vendor_name", "transaction_date", "total_amount", "vat_amount", "tin",
-    "invoice_number", "vat_classification", "expense_category", "items",
+    "invoice_number", "vat_classification", "currency", "expense_category", "items",
 )
