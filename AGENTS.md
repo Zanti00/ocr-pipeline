@@ -154,6 +154,7 @@ Full reference: [`docs/SDD.md § 3`](SDD.md).
 - Always pre-process images (OpenCV) before passing to Tesseract.
 - No CORS — this service is backend-to-backend only.
 - **No PII in logs.** Log job IDs and statuses only; never raw receipt text at `INFO` level in production.
+- **Documentation Sync:** All agents MUST update the corresponding `/docs` files immediately whenever they introduce a new technology, logic change, architectural shift, or new rules that aren't yet documented.
 
 ---
 
