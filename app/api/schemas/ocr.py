@@ -96,6 +96,8 @@ class OcrCallbackPayload(BaseModel):
     expense_category: Optional[str] = None
     location: Optional[str] = Field(default=None, max_length=255)
     ocr_confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    is_duplicate: bool = False
+    duplicate_similarity: Optional[float] = None
     items: List[ReceiptItem] = []
     status: Optional[str] = None
     error: Optional[str] = None
@@ -151,6 +153,8 @@ def build_callback_payload(
     error: str | None = None,
     rejection_code: str | None = None,
     rejection_reason: str | None = None,
+    is_duplicate: bool = False,
+    duplicate_similarity: float | None = None,
 ) -> OcrCallbackPayload:
     """Map the internal field set onto the SERMS contract.
 
@@ -173,6 +177,8 @@ def build_callback_payload(
         expense_category=fields_dict.get("expense_category"),
         location=fields_dict.get("location"),
         ocr_confidence_score=max(0.0, min(float(confidence), 1.0)),
+        is_duplicate=is_duplicate,
+        duplicate_similarity=round(duplicate_similarity, 4) if duplicate_similarity is not None else None,
         items=_valid_items(items or []),
         status=status,
         error=error,

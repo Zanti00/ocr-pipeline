@@ -142,7 +142,8 @@ async def test_payload_only_contains_contract_fields(harness, monkeypatch):
         "receipt_id", "vendor_name", "transaction_date", "total_amount",
         "vat_amount", "tin", "invoice_number", "vat_classification",
         "currency", "expense_category", "location", "ocr_confidence_score",
-        "items", "status", "error",
+        "is_duplicate", "duplicate_similarity", "items", "status", "error",
+        "rejection_code", "rejection_reason",
     }
     assert set(harness.payload) <= allowed
 

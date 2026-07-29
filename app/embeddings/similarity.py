@@ -9,7 +9,8 @@ async def find_similar_receipts(
     embedding: list[float],
     source_service: str,
     threshold: float,
-    days_window: int
+    days_window: int,
+    exclude_receipt_id: int | None = None,
 ) -> list[DuplicateMatch]:
     
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_window)
@@ -29,9 +30,12 @@ async def find_similar_receipts(
         .where(ReceiptEmbedding.source_service == source_service)
         .where(ReceiptEmbedding.created_at >= cutoff_date)
         .where(ReceiptEmbedding.embedding.cosine_distance(embedding) <= distance_threshold)
-        .order_by(text('distance ASC'))
-        .limit(10)
     )
+
+    if exclude_receipt_id is not None:
+        stmt = stmt.where(ReceiptEmbedding.receipt_id != exclude_receipt_id)
+
+    stmt = stmt.order_by(text('distance ASC')).limit(10)
     
     result = await session.execute(stmt)
     rows = result.all()

@@ -31,10 +31,12 @@ from app.core.pdf_handler import pdf_to_images
 from app.core.verification import Verification, verify
 from app.api.schemas.ocr import build_callback_payload
 from app.core.image_stitcher import stitch_segments
+from app.config import settings
 from app.db.models import ReceiptEmbedding
 from app.db.mongodb import MongoDBClient
 from app.db.postgres import AsyncSessionLocal
 from app.embeddings.generator import EmbeddingGenerator
+from app.embeddings.similarity import find_similar_receipts
 from app.llm.factory import create_provider
 
 logger = logging.getLogger(__name__)
@@ -108,9 +110,17 @@ async def process_receipt(
         )
 
         await _store_embedding(receipt_id, source_service, bundle.combined_text)
+        is_dup, dup_score, matches = await _evaluate_duplicate(receipt_id, source_service, bundle.combined_text)
+
         await MongoDBClient.update_job_status(
             job_id, "completed",
-            _job_document(bundle, extraction, verification, breakdown, force_process=force_process),
+            _job_document(
+                bundle, extraction, verification, breakdown,
+                force_process=force_process,
+                is_duplicate=is_dup,
+                duplicate_similarity=dup_score,
+                matches_count=len(matches),
+            ),
         )
 
         payload = build_callback_payload(
@@ -119,6 +129,8 @@ async def process_receipt(
             confidence=breakdown.score,
             status="completed",
             items=extraction.item_scan.payload() if extraction.item_scan else [],
+            is_duplicate=is_dup,
+            duplicate_similarity=dup_score,
         )
         logger.info(
             "Job %s complete: variant=%s psm=%s score=%.3f reasons=%s",
@@ -282,12 +294,44 @@ async def _store_embedding(receipt_id: int, source_service: str, text: str) -> N
         logger.warning("Embedding storage failed for receipt %s: %s", receipt_id, exc)
 
 
+async def _evaluate_duplicate(
+    receipt_id: int, source_service: str, text: str
+) -> tuple[bool, float | None, list]:
+    """Check pgvector for duplicate receipts within the configured lookback window.
+
+    Deliberately non-fatal: if vector query fails, defaults to (False, None, []).
+    """
+    if not text.strip():
+        return False, None, []
+    try:
+        embedding = EmbeddingGenerator.generate(text)
+        async with AsyncSessionLocal() as session:
+            matches = await find_similar_receipts(
+                session=session,
+                embedding=embedding,
+                source_service=source_service,
+                threshold=settings.duplicate_similarity_threshold,
+                days_window=settings.duplicate_days_window,
+                exclude_receipt_id=receipt_id,
+            )
+        if matches:
+            top_score = matches[0].similarity_score
+            return True, top_score, matches
+        return False, None, []
+    except Exception as exc:
+        logger.warning("Duplicate evaluation failed for receipt %s: %s", receipt_id, exc)
+        return False, None, []
+
+
 def _job_document(
     bundle: OcrBundle,
     extraction: Extraction,
     verification: Verification,
     breakdown: ConfidenceBreakdown,
     force_process: bool = False,
+    is_duplicate: bool = False,
+    duplicate_similarity: float | None = None,
+    matches_count: int = 0,
 ) -> dict:
     """The audit record.
 
@@ -302,6 +346,11 @@ def _job_document(
         "tesseract_confidence": round(bundle.confidence, 4),
         "composite_confidence_score": breakdown.score,
         "confidence_breakdown": breakdown.as_dict(),
+        "duplicate_check": {
+            "is_duplicate": is_duplicate,
+            "similarity_score": round(duplicate_similarity, 4) if duplicate_similarity is not None else None,
+            "matches_count": matches_count,
+        },
         "extracted_data": verification.fields,
         "ocr_selection": {
             "variant": bundle.primary.variant,

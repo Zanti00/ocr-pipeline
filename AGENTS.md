@@ -114,7 +114,7 @@ Indices: `idx_embeddings_source_service`, `idx_embeddings_created_at`, `idx_embe
 
 ### MongoDB — `ocr_jobs`
 
-Key fields: `job_id` (UUID v4), `receipt_id`, `file_url`, `callback_url`, `source_service`, `status` (`queued|processing|completed|failed`), `ocr_result` (all extracted fields + `confidence_score` + `line_items`), `duplicate_check` (`is_duplicate`, `similarity_score`, `matched_job_id`), `created_at`, `updated_at`.
+Key fields: `job_id` (UUID v4), `receipt_id`, `file_url`, `callback_url`, `source_service`, `status` (`queued|processing|completed|failed`), `ocr_result` (all extracted fields + `confidence_score` + `line_items`), `duplicate_check` (`is_duplicate`, `similarity_score`, `matches_count`), `created_at`, `updated_at`.
 
 ### Redis cache
 
