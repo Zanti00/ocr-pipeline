@@ -30,6 +30,7 @@ from app.core.ocr_engine import OcrBundle, read_pooled
 from app.core.pdf_handler import pdf_to_images
 from app.core.verification import Verification, verify
 from app.api.schemas.ocr import build_callback_payload
+from app.core.image_stitcher import stitch_segments
 from app.db.models import ReceiptEmbedding
 from app.db.mongodb import MongoDBClient
 from app.db.postgres import AsyncSessionLocal
@@ -61,14 +62,29 @@ async def process_receipt(
     file_url: str,
     callback_url: str,
     source_service: str,
+    force_process: bool = False,
+    file_urls: list[str] | None = None,
 ) -> None:
-    logger.info("Starting OCR pipeline for job %s", job_id)
+    logger.info("Starting OCR pipeline for job %s (force_process=%s)", job_id, force_process)
 
     try:
         await MongoDBClient.update_job_status(job_id, "processing")
 
-        file_bytes = await download_file(file_url)
-        images = load_images(file_bytes, file_url)
+        if file_urls and len(file_urls) >= 2:
+            segment_images: list[Image.Image] = []
+            for url in file_urls:
+                b = await download_file(url)
+                imgs = load_images(b, url)
+                if imgs:
+                    segment_images.append(imgs[0])
+            if len(segment_images) < 2:
+                raise ValueError("Failed to load at least 2 valid image segments")
+            images = [stitch_segments(segment_images)]
+        else:
+            primary_url = file_url or (file_urls[0] if file_urls else "")
+            file_bytes = await download_file(primary_url)
+            images = load_images(file_bytes, primary_url)
+
         if not images:
             raise ValueError("No images extracted from file")
 
@@ -94,7 +110,7 @@ async def process_receipt(
         await _store_embedding(receipt_id, source_service, bundle.combined_text)
         await MongoDBClient.update_job_status(
             job_id, "completed",
-            _job_document(bundle, extraction, verification, breakdown),
+            _job_document(bundle, extraction, verification, breakdown, force_process=force_process),
         )
 
         payload = build_callback_payload(
@@ -208,6 +224,17 @@ async def _ask_model_for_location(baseline: Extraction) -> str | None:
         return None
 
 
+async def _ask_model_for_items(baseline: Extraction) -> list[dict] | None:
+    if baseline.item_scan and baseline.item_scan.count > 0:
+        return None
+    try:
+        provider = create_provider()
+        return await provider.analyze_line_items(baseline.lines)
+    except Exception as exc:
+        logger.warning("Item analysis assist unavailable, keeping deterministic items: %s", exc)
+        return None
+
+
 
 def _embedder():
     """Return an embedding callable, or None when the model is unavailable."""
@@ -260,6 +287,7 @@ def _job_document(
     extraction: Extraction,
     verification: Verification,
     breakdown: ConfidenceBreakdown,
+    force_process: bool = False,
 ) -> dict:
     """The audit record.
 
@@ -269,6 +297,7 @@ def _job_document(
     keep them - and they are what makes a score explainable after the fact.
     """
     return {
+        "quality_override": force_process,
         "raw_ocr_text": bundle.combined_text,
         "tesseract_confidence": round(bundle.confidence, 4),
         "composite_confidence_score": breakdown.score,

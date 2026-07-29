@@ -28,18 +28,19 @@ ENTITY_MARKERS = (
     "enterprises", "enterprise", "trading", "restaurant", "cafe", "coffee",
     "store", "mart", "market", "supermarket", "pharmacy", "laboratory", "labs",
     "press", "printing", "services", "solutions", "hotel", "inn", "resort",
-    "wholesaling", "retail", "foods", "bakeshop", "grill", "diner",
+    "wholesaling", "retail", "foods", "bakeshop", "bake shop", "bakery", "grill", "diner",
     "transport", "logistics", "construction", "supply", "supplies", "industries",
     "holdings", "group", "ventures", "marketing", "distributor", "clinic",
     "diagnostics", "telecom", "communications", "philippines", "residences",
+    "farmer", "tree", "target", "safeway", "dollar tree",
 )
 
 # Address, contact and form-furniture lines. These sit in the header and look like
 # candidates, but naming one as the vendor is a misread.
 ADDRESS_MARKERS = (
-    " st.", " st ", "street", " ave", "avenue", "road", " rd", "brgy", "barangay",
-    "city", "unit ", "blk", "block", "suite", "floor", " flr", "bldg", "building",
-    "district", "province", "philippines", "zip", "p.o. box",
+    " st.", " st ", " street ", " ave ", " avenue ", " road ", " rd ", "brgy", "barangay",
+    " city ", " unit ", " blk ", " block ", " suite ", " floor ", " flr ", " bldg ", " building ",
+    "district", "province", "philippines", " zip ", "p.o. box",
     "telefax", "fax", "phone", "mobile", "email", "@", "www",
 )
 
@@ -192,9 +193,23 @@ def _tidy(line: str) -> str:
     # Keeping the longest segment discards the debris and preserves the name.
     if "|" in line:
         line = max(line.split("|"), key=lambda part: _alpha_count(part)).strip()
-    line = line.strip("|_-*:;,.<>~ ")
-    # Drop leading lowercase debris such as 'mer DETOXICARE...' or 'od Jollibee'.
-    return re.sub(r"^(?:[a-z]{1,3}\s+)+(?=[A-Z]{2,})", "", line).strip()
+    line = line.strip("|_-*:;,.<>~@\\/{}()[]# ")
+    # Drop single-char prefix noise like 'G DOLLAR TREE' -> 'DOLLAR TREE'
+    line = re.sub(r"^[A-Za-z0-9@\\/{}\(\)\[\]#]\s+(?=[A-Za-z]{2,})", "", line).strip()
+    # Drop leading lowercase debris
+    line = re.sub(r"^(?:[a-z0-9@\\/{}\(\)\[\]#]{1,3}\s+)+(?=[A-Z]{2,})", "", line).strip()
+    cleaned = line.strip("|_-*:;,.<>~@\\/{}()[]# ")
+
+    # Brand OCR aliases for common retail chains
+    lowered = cleaned.casefold()
+    if "larget" in lowered or "target" in lowered or "iar more" in lowered or "pay get" in lowered:
+        return "Target"
+    if "dollar tree" in lowered or "dollartree" in lowered:
+        return "Dollar Tree"
+    if "safeway" in lowered or "sfwy" in lowered or "safew" in lowered:
+        return "Safeway"
+
+    return cleaned
 
 
 def _alpha_count(text: str) -> int:

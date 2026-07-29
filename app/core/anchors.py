@@ -29,7 +29,7 @@ DATE_RE = re.compile(
 )
 
 TOTAL_KEYWORDS = (
-    "total", "amount due", "amt due", "grand total", "balance due", "subtotal",
+    "total", "amount due", "amt due", "grand total", "balance due", "subtotal", "balance",
 )
 TAX_KEYWORDS = ("vat", "tax", "sst", "gst", "vatable", "zero-rated", "vat-exempt")
 DOC_KEYWORDS = (

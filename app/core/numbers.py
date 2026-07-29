@@ -36,6 +36,10 @@ def normalize_money(raw: object, country: str | None = None) -> float | None:
     if not text or not re.search(r"\d", text):
         return None
 
+    # Handle trailing minus signs (e.g. '2.98-' or '0.50-')
+    if text.endswith("-") and not text.startswith("-"):
+        text = "-" + text[:-1]
+
     dot_decimal = country is None or country.upper() in DOT_DECIMAL_COUNTRIES
 
     if re.fullmatch(r"-?\d{1,3}(\.\d{3})*,\d{1,2}", text) and not dot_decimal:

@@ -1,0 +1,27 @@
+{
+  "image": "receipt 17.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": false,
+  "notes": "Safeway long grocery slip with Card Savings trailing minuses.",
+  "expected": {
+    "vendor_name": "Safeway",
+    "country": "US",
+    "currency": "USD",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": null,
+    "net_sales": 72.33,
+    "tax_amount": 0.58,
+    "tax_type": "SALES_TAX",
+    "total_sales": 72.91,
+    "service_charge": null,
+    "total_amount": 72.91,
+    "vat_classification": null,
+    "invoice_number": null,
+    "expense_category": "Meals"
+  },
+  "unknown": ["tax_rate", "transaction_date"]
+}

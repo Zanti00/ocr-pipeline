@@ -1,0 +1,27 @@
+{
+  "image": "receipt 11.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": false,
+  "notes": "Restaurant receipt with food total and tax.",
+  "expected": {
+    "vendor_name": "STATION #5",
+    "country": "US",
+    "currency": "USD",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": null,
+    "net_sales": 64.90,
+    "tax_amount": 5.88,
+    "tax_type": "SALES_TAX",
+    "total_sales": 70.74,
+    "service_charge": null,
+    "total_amount": 70.74,
+    "vat_classification": null,
+    "invoice_number": "A008763",
+    "expense_category": "Meals"
+  },
+  "unknown": ["tax_rate", "transaction_date"]
+}

@@ -138,17 +138,25 @@ def _fill_gaps(
         result.evidence["total_sales"] = f"derived: equals total {total} (no tax/charges)"
         total_sales = total
 
-    if total is None and total_sales is not None:
-        candidate = round(total_sales + (service or 0.0), 2)
-        # Only accept a derived total if the figure is actually printed somewhere,
-        # otherwise we would be inventing the single most consequential field.
-        if _token_present(candidate, scan, country):
-            result.values["total_amount"] = candidate
-            result.derived.add("total_amount")
-            result.derivations.add("total_from_sales")
-            result.evidence["total_amount"] = (
-                f"derived: {total_sales} + service {service or 0.0}, confirmed on page"
-            )
+    if total is None:
+        if total_sales is not None:
+            candidate = round(total_sales + (service or 0.0), 2)
+            if _token_present(candidate, scan, country):
+                result.values["total_amount"] = candidate
+                result.derived.add("total_amount")
+                result.derivations.add("total_from_sales")
+                result.evidence["total_amount"] = (
+                    f"derived: {total_sales} + service {service or 0.0}"
+                )
+        elif net is not None and tax is not None:
+            candidate = round(net + tax + (service or 0.0), 2)
+            if _token_present(candidate, scan, country):
+                result.values["total_amount"] = candidate
+                result.derived.add("total_amount")
+                result.derivations.add("total_from_net_tax")
+                result.evidence["total_amount"] = (
+                    f"derived: net {net} + tax {tax} + service {service or 0.0}"
+                )
 
 
 def _token_present(value: float, scan: LayoutScan, country: str | None) -> bool:

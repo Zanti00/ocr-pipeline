@@ -48,11 +48,13 @@ ITEM_NOISE_PATTERNS = (
     r"change\s+due", r"payment", r"\bcash\b", r"\bcard\b", r"tender",
     r"authority\s+to\s+print", r"\bocn\b", r"booklets", r"valid\s+until",
     r"\batp\b", r"vat\s*reg", r"\btin\b", r"balance", r"amount\s+in\s+words",
-    r"total\s+item", r"item\s+sold",
+    r"total\s+item", r"item\s+sold", r"regular\s+price", r"card\s+savings?",
+    r"card\s+saver", r"mfrcpn", r"cartwheel",
 )
 _ITEM_NOISE_RE = re.compile("|".join(ITEM_NOISE_PATTERNS), re.IGNORECASE)
 
 _LEADING_QUANTITY_RE = re.compile(r"^\s*(\d{1,3})\s*(?:x|pc|pcs|pieces)?\s+(?=\S)")
+_UPC_PREFIX_RE = re.compile(r"^\s*(?:\d{8,14}|[A-Za-z0-9]{2,6}\d{7,14})\s+")
 # 'name ... x2' and, more importantly, the BIR form layout which prints the
 # quantity in its own column immediately left of the amount: 'Bond Paper 2 490.00'.
 # Without this the quantity silently defaults to 1 on every form receipt.
@@ -119,19 +121,16 @@ class ItemScan:
         return len(self.items)
 
     def payload(self) -> list[dict[str, object]]:
-        """Rows to transmit. Empty unless the items reconciled."""
-        if not self.reconciled:
-            return []
+        """Rows to transmit."""
         rows: list[dict[str, object]] = []
         for item in self.items:
             price = (
-                item.price if self.price_basis == "line_total"
+                item.price if self.price_basis in ("line_total", "none")
                 else round(item.price * item.quantity, 2)
             )
             if price <= 0:
-                # SERMS' PRS path validates item price as gt:0, so a zero-priced
-                # line would be rejected there even though the OCR callback allows
-                # it. Dropping the line keeps the receipt acceptable.
+                # SERMS' PRS path validates item price as gt:0, so a non-positive
+                # line is withheld from payload to avoid API rejection.
                 continue
             rows.append(item.payload(price))
         return rows
@@ -240,7 +239,7 @@ def _build_item(
 ) -> ExtractedItem | None:
     """Build an item from a line with its money words already removed."""
     price = normalize_money(money_token)
-    if price is None or price <= 0:
+    if price is None or price == 0:
         return None
 
     quantity = 1
@@ -276,6 +275,7 @@ def _clean_name(text: str) -> str:
     """
     cleaned = re.sub(r"[|_]+", " ", text)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:;-*\\/")
+    cleaned = _UPC_PREFIX_RE.sub("", cleaned).strip(" .,:;-*\\/")
     if not any(ch.isalpha() for ch in cleaned):
         return ""
     return cleaned[:MAX_NAME_LENGTH]

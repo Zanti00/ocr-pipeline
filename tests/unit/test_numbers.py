@@ -35,3 +35,9 @@ def test_unparseable_tokens_return_none():
 def test_numeric_inputs_pass_through_rounded():
     assert normalize_money(1306) == 1306.00
     assert normalize_money(139.933) == 139.93
+
+
+def test_trailing_minus_sign_parsed_as_negative_float():
+    assert normalize_money("2.98-", "US") == -2.98
+    assert normalize_money("0.50-", "US") == -0.50
+    assert normalize_money("$1.71-", "US") == -1.71

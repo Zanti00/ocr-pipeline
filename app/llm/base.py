@@ -35,3 +35,7 @@ class LLMProvider(ABC):
         """Break a tie between exactly two candidate categories."""
         return None
 
+    async def analyze_line_items(self, lines: list[str]) -> list[dict] | None:
+        """Analyze line-item structures (quantity, name, price) from receipt lines."""
+        return None
+

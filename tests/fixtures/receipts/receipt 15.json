@@ -1,0 +1,27 @@
+{
+  "image": "receipt 15.jpeg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": false,
+  "notes": "Target retail receipt with item discounts and Cartwheel savings.",
+  "expected": {
+    "vendor_name": "Target",
+    "country": "US",
+    "currency": "USD",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": "2016-03-06",
+    "net_sales": 243.36,
+    "tax_amount": 8.37,
+    "tax_type": "SALES_TAX",
+    "total_sales": 251.73,
+    "service_charge": null,
+    "total_amount": 251.73,
+    "vat_classification": null,
+    "invoice_number": null,
+    "expense_category": "Supplies"
+  },
+  "unknown": ["tax_rate"]
+}

@@ -1,0 +1,39 @@
+{
+  "image": "receipt 10.png",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": false,
+  "notes": "US bakery POS slip with tip suggestions.",
+  "expected": {
+    "vendor_name": "Ma & Pa's Bake Shop",
+    "country": "US",
+    "currency": "USD",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": "2018-10-09",
+    "net_sales": 17.98,
+    "tax_amount": 1.35,
+    "tax_type": "SALES_TAX",
+    "total_sales": 19.33,
+    "service_charge": null,
+    "total_amount": 19.33,
+    "vat_classification": null,
+    "invoice_number": "1710156",
+    "expense_category": "Meals"
+  },
+  "expected_items": [
+    {
+      "name": "1 Dozen Donuts",
+      "quantity": 1,
+      "price": 10.99
+    },
+    {
+      "name": "1 Box O Joe",
+      "quantity": 1,
+      "price": 6.99
+    }
+  ],
+  "unknown": ["tax_rate"]
+}

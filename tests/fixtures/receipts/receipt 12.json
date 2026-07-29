@@ -1,0 +1,27 @@
+{
+  "image": "receipt 12.png",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": false,
+  "notes": "The Fresh Farmer restaurant slip.",
+  "expected": {
+    "vendor_name": "THE FRESH FARMER",
+    "country": "US",
+    "currency": "USD",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": "2018-05-29",
+    "net_sales": 18.92,
+    "tax_amount": 1.23,
+    "tax_type": "SALES_TAX",
+    "total_sales": 20.15,
+    "service_charge": null,
+    "total_amount": 20.15,
+    "vat_classification": null,
+    "invoice_number": null,
+    "expense_category": "Meals"
+  },
+  "unknown": ["tax_rate"]
+}

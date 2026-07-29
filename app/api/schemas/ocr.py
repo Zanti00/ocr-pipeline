@@ -15,15 +15,37 @@ SUPPORTED_CURRENCIES: frozenset[str] = frozenset({
 
 class OcrProcessRequest(BaseModel):
     receipt_id: int
-    file_url: str
+    file_url: Optional[str] = None
+    file_urls: Optional[List[str]] = None
     callback_url: str
     source_service: Optional[str] = None
+    force_process: bool = False
 
 
 class OcrProcessResponse(BaseModel):
     job_id: str
     status: str
     message: str
+
+
+class QualityRejectionResponse(BaseModel):
+    """Synchronous pre-OCR rejection so the client can toast immediately.
+
+    Returned as HTTP 422 *before* a Celery job is queued. Consumers should
+    surface ``message`` / ``rejection_reason`` as a toast or modal — there is
+    no async callback for this path.
+    """
+
+    status: str = "rejected"
+    message: str = "Image quality check failed."
+    rejection_code: str
+    rejection_reason: str
+    blur_score: float = 0.0
+    brightness: float = 0.0
+    resolution: tuple[int, int] = (0, 0)
+    segment_index: Optional[int] = None
+    job_id: Optional[str] = None
+    receipt_id: Optional[int] = None
 
 
 class ReceiptItem(BaseModel):
@@ -166,7 +188,7 @@ def _valid_items(raw_items: list[dict[str, Any]]) -> list[ReceiptItem]:
 
 
 __all__ = [
-    "OcrProcessRequest", "OcrProcessResponse", "ReceiptItem",
+    "OcrProcessRequest", "OcrProcessResponse", "QualityRejectionResponse", "ReceiptItem",
     "OcrCallbackPayload", "build_callback_payload", "EXPENSE_CATEGORIES",
     "SUPPORTED_CURRENCIES",
 ]

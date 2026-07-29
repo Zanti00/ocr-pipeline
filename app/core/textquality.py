@@ -32,9 +32,9 @@ def looks_like_words(line: str) -> bool:
     tokens = re.findall(r"[A-Za-z][A-Za-z.'&-]*", stripped)
     solid = [token for token in tokens if len(token) >= 3]
     if len(solid) < 2:
-        # A single long word can still be a name ('DETOXICARE'), but a scatter of
-        # short fragments is almost always noise.
-        return len(solid) == 1 and len(solid[0]) >= 8 and len(tokens) <= 2
+        # A single word of 4+ letters (e.g. 'Target', 'Safeway', 'Subway') can be a business name,
+        # but a scatter of short fragments is almost always noise.
+        return len(solid) == 1 and len(solid[0]) >= 4 and len(tokens) <= 2
 
     # Noise alternates case mid-word; real headers are caps or title case.
     odd = sum(1 for token in solid if re.search(r"[a-z][A-Z]", token))

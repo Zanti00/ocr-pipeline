@@ -242,7 +242,7 @@ def _best_layout(
     """
     best: tuple[tuple[int, int, int], LayoutScan, MoneyResult] | None = None
 
-    for reading in [bundle.primary, *bundle.supporting]:
+    for reading in bundle.all_readings:
         scan = scan_layout(reading.lines)
         money = resolve_money(scan, locale, vat_registered)
         rank = (

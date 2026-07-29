@@ -1,0 +1,27 @@
+{
+  "image": "receipt 16.png",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": false,
+  "notes": "Dollar Tree retail slip.",
+  "expected": {
+    "vendor_name": "Dollar Tree",
+    "country": "US",
+    "currency": "USD",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": "2022-09-17",
+    "net_sales": 23.00,
+    "tax_amount": 0.00,
+    "tax_type": "SALES_TAX",
+    "total_sales": 23.00,
+    "service_charge": null,
+    "total_amount": 23.00,
+    "vat_classification": null,
+    "invoice_number": "7534001850400421435062",
+    "expense_category": "Supplies"
+  },
+  "unknown": ["tax_rate", "tax_amount"]
+}

@@ -8,6 +8,7 @@ from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.prompts import (
     CATEGORY_TIEBREAK_PROMPT,
+    ITEM_ANALYSIS_PROMPT,
     LOCATION_SELECTION_PROMPT,
     RECEIPT_EXTRACTION_PROMPT,
     VENDOR_SELECTION_PROMPT,
@@ -132,3 +133,15 @@ class OllamaProvider(LLMProvider):
         picked = str(choice).strip()
         # Reject anything outside the two options offered.
         return picked if picked in options else None
+
+    async def analyze_line_items(self, lines: list[str]) -> list[dict] | None:
+        if not lines:
+            return None
+        prompt = ITEM_ANALYSIS_PROMPT.format(
+            lines="\n".join(f"- {line}" for line in lines[:50])
+        )
+        result = await self._generate(prompt, token_limit=EXTRACTION_TOKEN_LIMIT, timeout=60.0)
+        if not result or "items" not in result:
+            return None
+        items = result.get("items")
+        return items if isinstance(items, list) else None

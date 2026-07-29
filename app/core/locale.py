@@ -69,10 +69,17 @@ EVIDENCE: tuple[tuple[str, str, float, str], ...] = (
     (r"\bthailand\b|bangkok", "TH", 3.0, "TH locality"),
 )
 
+_US_CITY_STATE = re.compile(
+    r"\b[a-zA-Z\s]{2,25},\s*(" + "|".join(_US_STATES) + r")\b"
+)
 _US_ZIP_STATE = re.compile(
     r"\b(" + "|".join(_US_STATES) + r")\s+\d{5}(?:-\d{4})?\b"
 )
 _US_PHONE = re.compile(r"\(\d{3}\)\s*\d{3}\s*-\s*\d{4}")
+DOLLAR_SYMBOL_RE = re.compile(r"\$\s*\d")
+DOLLAR_CURRENCIES: dict[str, str] = {
+    "US": "USD", "SG": "SGD", "HK": "HKD", "AU": "AUD", "BN": "BND",
+}
 
 MIN_CONFIDENT_SCORE = 3.0
 
@@ -109,14 +116,28 @@ def detect_locale(text: str) -> LocaleGuess:
     if _US_ZIP_STATE.search(text):
         scores["US"] = scores.get("US", 0.0) + 4.0
         evidence.setdefault("US", []).append("US state + ZIP")
+    if _US_CITY_STATE.search(text):
+        scores["US"] = scores.get("US", 0.0) + 3.0
+        evidence.setdefault("US", []).append("US city + state")
     if _US_PHONE.search(text):
         scores["US"] = scores.get("US", 0.0) + 2.0
         evidence.setdefault("US", []).append("US phone format")
 
+    dollar_token_count = len(DOLLAR_SYMBOL_RE.findall(lowered))
+    if dollar_token_count >= 2:
+        if "US" not in scores and not scores:
+            scores["US"] = 3.0
+            evidence.setdefault("US", []).append("$ symbol (USD prior)")
+        elif "US" in scores:
+            scores["US"] += 1.5
+            evidence.setdefault("US", []).append("$ symbol (USD prior)")
+
     currency_symbol = _currency_from_symbol(lowered)
 
     if not scores:
-        # No country evidence. A currency symbol alone can still pin the currency.
+        if dollar_token_count == 1:
+            return LocaleGuess(country=None, currency=None, score=0.0,
+                               evidence=["stray $ symbol, unresolved locale"])
         return LocaleGuess(country=None, currency=currency_symbol, score=0.0,
                            evidence=["no country evidence"])
 
@@ -128,12 +149,14 @@ def detect_locale(text: str) -> LocaleGuess:
         country, score = "BN", scores["BN"]
 
     confident = score >= MIN_CONFIDENT_SCORE
-    # Country evidence outranks a symbol match. Country is established by several
-    # corroborating signals; a symbol is one character that OCR may have invented.
     if confident:
         currency = COUNTRY_CURRENCY.get(country) or currency_symbol
+        if currency is None and dollar_token_count >= 1 and country in DOLLAR_CURRENCIES:
+            currency = DOLLAR_CURRENCIES[country]
     else:
         currency = currency_symbol
+        if currency is None and dollar_token_count >= 2:
+            currency = "USD"
 
     return LocaleGuess(
         country=country if confident else None,
@@ -148,3 +171,4 @@ def _currency_from_symbol(lowered: str) -> str | None:
         if re.search(pattern, lowered):
             return currency
     return None
+

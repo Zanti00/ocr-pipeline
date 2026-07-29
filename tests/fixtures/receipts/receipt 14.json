@@ -1,0 +1,27 @@
+{
+  "image": "receipt 14.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": true,
+  "notes": "Notice slip regarding credit card fee surcharges. No amounts or items.",
+  "expected": {
+    "vendor_name": null,
+    "country": null,
+    "currency": null,
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": null,
+    "net_sales": null,
+    "tax_amount": null,
+    "tax_type": null,
+    "total_sales": null,
+    "service_charge": null,
+    "total_amount": null,
+    "vat_classification": null,
+    "invoice_number": null,
+    "expense_category": null
+  },
+  "unknown": []
+}

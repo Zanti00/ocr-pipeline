@@ -175,11 +175,42 @@ def remove_shadow(gray: np.ndarray, kernel: int = 41) -> np.ndarray:
 def upscale(gray: np.ndarray) -> np.ndarray:
     """Scale up small images so character height reaches Tesseract's sweet spot."""
     height, width = gray.shape[:2]
+
+    # For tall/narrow receipts (aspect ratio height/width >= 2.0), scale up based on width
+    # so text characters reach sufficient x-height for accurate Tesseract reading.
+    if height > 0 and width > 0 and (height / width) >= 2.0 and width < 750:
+        factor = min(750.0 / width, MAX_UPSCALE)
+        return cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
+
     longest = max(height, width)
     if longest >= TARGET_LONG_EDGE:
         return gray
     factor = min(TARGET_LONG_EDGE / longest, MAX_UPSCALE)
     return cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
+
+
+def slice_tall_image(image: Image.Image, max_aspect_ratio: float = 2.2) -> list[Image.Image]:
+    """Slice a tall receipt into overlapping vertical regions if aspect ratio exceeds threshold."""
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return [image]
+
+    aspect = height / width
+    if aspect <= max_aspect_ratio:
+        return [image]
+
+    num_slices = 2 if aspect <= 3.5 else 3
+    slice_height = int(height / (num_slices - 0.2))  # Overlapping slices
+    overlap = int(slice_height * 0.2)
+
+    slices: list[Image.Image] = []
+    for i in range(num_slices):
+        start_y = max(0, i * (slice_height - overlap))
+        end_y = min(height, start_y + slice_height)
+        sub_img = image.crop((0, start_y, width, end_y))
+        slices.append(sub_img)
+
+    return slices
 
 
 def denoise(gray: np.ndarray) -> np.ndarray:

@@ -147,11 +147,12 @@ class TestReconciliation:
         # The transmitted price is always the line total, whichever convention won.
         assert scan.payload()[0]["price"] == 150.00
 
-    def test_unreconciled_items_are_withheld_entirely(self):
-        # A partial list looks authoritative while being wrong.
+    def test_unreconciled_items_are_still_transmitted_in_payload(self):
+        # Items are transmitted so user input fields are populated, while reconciled remains False.
         scan = reconcile_items(self._items((1, 10.00), (1, 20.00)), {"net_sales": 99.00})
         assert scan.reconciled is False
-        assert scan.payload() == []
+        assert len(scan.payload()) == 2
+        assert scan.payload()[0]["price"] == 10.00
 
     def test_vat_inclusive_total_is_an_acceptable_target(self):
         scan = reconcile_items(

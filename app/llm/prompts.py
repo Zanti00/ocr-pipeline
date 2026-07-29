@@ -76,3 +76,16 @@ Return the JSON object only.
 OCR TEXT:
 {ocr_text}
 """
+
+
+ITEM_ANALYSIS_PROMPT = """Analyze the structural line items from the provided receipt text lines.
+
+Rules:
+- Identify each line item that represents a purchased product or service.
+- Extract "name" (clean product description), "quantity" (integer, default 1 if omitted), and "price" (number).
+- Do NOT include subtotal, tax, total, payment, change, or store discount lines.
+- Respond with JSON only: {{"items": [{{"name": "<clean item name>", "quantity": 1, "price": 0.00}}]}}
+
+RECEIPT LINES:
+{lines}
+"""

@@ -1,0 +1,27 @@
+{
+  "image": "receipt 13.jpg",
+  "source": "real_sample",
+  "script": "latin",
+  "print_type": "machine_printed",
+  "truth_source": "ocr_text_verified",
+  "expect_manual_review": false,
+  "notes": "Dinefine restaurant slip.",
+  "expected": {
+    "vendor_name": "DINEFINE RESTAURANT",
+    "country": "US",
+    "currency": "USD",
+    "vendor_tax_id": null,
+    "vendor_tax_id_type": null,
+    "transaction_date": "2025-09-30",
+    "net_sales": 47.50,
+    "tax_amount": 3.80,
+    "tax_type": "SALES_TAX",
+    "total_sales": 51.30,
+    "service_charge": null,
+    "total_amount": 51.30,
+    "vat_classification": null,
+    "invoice_number": "R-2547",
+    "expense_category": "Meals"
+  },
+  "unknown": ["tax_rate"]
+}

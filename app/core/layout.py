@@ -39,7 +39,7 @@ INTEGER_PART_RE = re.compile(r"^[^\d]{0,3}\d{1,7}$")
 LABELS: dict[str, tuple[str, ...]] = {
     "total_amount": (
         "total amount due", "total amt due", "amount due", "amt due", "total due",
-        "grand total", "balance due", "total payable", "net amount due",
+        "grand total", "balance due", "total payable", "net amount due", "balance",
         # Bare 'total' last: longest-match ordering means 'total sales' and
         # 'total amount due' still win, and the alphabetic-boundary check keeps
         # it from firing inside 'subtotal'. Without it a POS receipt printing a
@@ -183,7 +183,7 @@ def _pair_value(
     below = [
         token
         for token in tokens
-        if 0 < token.center_y - row_center <= line_height * 1.8
+        if 0 < token.center_y - row_center <= line_height * 2.5
     ]
     if below:
         return max(below, key=lambda t: t.left), "row_below"
@@ -229,9 +229,15 @@ def _plausible_amount(token: str) -> bool:
 def _best_label(line_text: str) -> tuple[str, str] | None:
     """Longest keyword match on the line."""
     lowered = line_text.casefold()
+    # Reject bare 'total' match if line looks like a product item line (e.g. 'COLGATE TOTAL WHTNING')
+    is_item_product_line = bool(
+        re.search(r"\b(colgate|tpst|sauce|chips|brush|shampoo|soap|pkg|oz|fl|ea|pcs|qty|price)\b", lowered)
+    )
     best: tuple[str, str] | None = None
     for field_name, keywords in LABELS.items():
         for keyword in keywords:
+            if keyword == "total" and is_item_product_line:
+                continue
             position = lowered.find(keyword)
             if position == -1:
                 continue

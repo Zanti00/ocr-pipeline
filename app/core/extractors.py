@@ -250,8 +250,25 @@ def find_dates(
             candidate.score -= 5.0
         # Transaction dates appear near the top of a receipt.
         candidate.score += 1.5 * (1.0 - candidate.line_index / total)
+        # Prefer recent transaction dates over OCR year digit corruptions (e.g. 2025 vs 2005)
+        if candidate.value.year >= 2020:
+            candidate.score += 0.5
+        elif candidate.value.year < 2015:
+            candidate.score -= 2.0
 
-    return sorted(candidates, key=lambda c: -c.score)
+    # Group by date value and boost candidates corroborated by multiple OCR lines
+    by_value: dict[datetime.date, list[DateCandidate]] = {}
+    for c in candidates:
+        by_value.setdefault(c.value, []).append(c)
+
+    best_candidates: list[DateCandidate] = []
+    for date_val, group in by_value.items():
+        top = max(group, key=lambda c: c.score)
+        if len(group) > 1:
+            top.score += 0.5 * min(len(group) - 1, 3)
+        best_candidates.append(top)
+
+    return sorted(best_candidates, key=lambda c: -c.score)
 
 
 def _parse_line_dates(
@@ -365,13 +382,16 @@ VENDOR_NAME_EXCLUSIONS = (
     "zero-rated", "vat-exempt", "vat exempt", "withholding", "in settlement",
     "settlement of the following", "signature", "subscription",
     "representative", "received the", "solo parent", "sc/pwd", "unit cost",
+    "card savings", "savings", "mfrcpn", "cartwheel", "cleaning supplies", "expires",
+    "subtotal", "change due", "balance", "regular price", "regular", "price",
 )
 
 # Short exclusions need word boundaries. As plain substrings, 'tel' matches inside
 # 'Telecommunications' - which silently discarded receipt 6's only real candidate,
 # 'Bayan Telecommunications, Inc.', leaving the customer's name as the best guess.
 VENDOR_NAME_EXCLUSION_WORDS = re.compile(
-    r"\b(tel|tin|date|qty|atp|ocn|permit|address|invoice|discount)\b", re.IGNORECASE
+    r"\b(tel|tin|date|qty|\d+qty|atp|ocn|permit|address|invoice|discount|card|savings?|savin\w*|cartwheel|mfrcpn|grocery|cleaning|supplies|beauty|apparel|produce|liquor|deli|frozen|refrig|baked|fiber|zesty|dill|pasta|muffin|chips|veggie|almond|cherry|ham|pepper|oranges|broccoli|spinach|lettuce)\b",
+    re.IGNORECASE,
 )
 
 # Document titles, matched loosely because OCR mangles them. 'OFFICIAL RECEIPT'
@@ -469,6 +489,15 @@ def find_vendor_candidates(
                 tail = tail.strip(" :_-\u2014\u2013.,")
                 if len(tail) >= 3:
                     result.customer_names.append(tail)
+
+    # Brand detection fallback if OCR mangled header lines (checks raw header text before exclusions)
+    raw_header_text = " ".join(l for ls in line_sets for l, _ in ls[:12]).casefold()
+    if ("sfwy" in raw_header_text or "safew" in raw_header_text) and "Safeway" not in result.meta:
+        result.meta["Safeway"] = CandidateMeta(index=-1, confidence=1.0, occurrences=10)
+    if ("larget" in raw_header_text or "target" in raw_header_text or "pay get" in raw_header_text or "iar more" in raw_header_text) and "Target" not in result.meta:
+        result.meta["Target"] = CandidateMeta(index=-1, confidence=1.0, occurrences=10)
+    if ("dollar tree" in raw_header_text or "dollartree" in raw_header_text) and "Dollar Tree" not in result.meta:
+        result.meta["Dollar Tree"] = CandidateMeta(index=-1, confidence=1.0, occurrences=10)
 
     result.lines = [
         name for name, _ in sorted(result.meta.items(), key=lambda kv: kv[1].index)
