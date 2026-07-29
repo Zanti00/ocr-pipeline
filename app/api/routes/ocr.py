@@ -6,7 +6,10 @@ from PIL import Image
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from app.api.schemas.ocr import OcrProcessRequest, OcrProcessResponse, QualityRejectionResponse
+from app.api.schemas.ocr import (
+    OcrProcessRequest, OcrProcessResponse, QualityRejectionResponse, build_callback_payload,
+)
+from app.core.callback import send_callback
 from app.core.image_quality import check_image_quality
 from app.db.mongodb import MongoDBClient
 from app.dependencies import verify_api_key
@@ -35,8 +38,8 @@ async def process_receipt(
         raise HTTPException(status_code=400, detail="Either file_url or file_urls must be provided.")
 
     # Synchronous pre-OCR quality check if force_process is False.
-    # Rejection is immediate (HTTP 422) — no Celery job, no callback — so the
-    # client must toast from this response. We still write a Mongo audit row.
+    # Rejection is immediate (HTTP 422) — we also dispatch a callback if callback_url is present
+    # so async consumers receive the rejection event.
     if not request.force_process:
         try:
             for idx, url in enumerate(urls):
@@ -81,6 +84,23 @@ async def process_receipt(
                                 "Failed to persist quality rejection for receipt_id=%s: %s",
                                 request.receipt_id, mongo_exc, exc_info=True,
                             )
+
+                        if request.callback_url:
+                            cb_payload = build_callback_payload(
+                                receipt_id=request.receipt_id,
+                                status="rejected",
+                                error=reason,
+                                rejection_code=code,
+                                rejection_reason=reason,
+                            )
+                            try:
+                                await send_callback(request.callback_url, cb_payload.model_dump())
+                            except Exception as cb_exc:
+                                logger.error(
+                                    "Failed to send quality rejection callback for receipt_id=%s: %s",
+                                    request.receipt_id, cb_exc, exc_info=True,
+                                )
+
                         response_payload = QualityRejectionResponse(
                             status="rejected",
                             message=reason,

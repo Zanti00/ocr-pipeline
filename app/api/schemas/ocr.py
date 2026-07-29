@@ -99,6 +99,8 @@ class OcrCallbackPayload(BaseModel):
     items: List[ReceiptItem] = []
     status: Optional[str] = None
     error: Optional[str] = None
+    rejection_code: Optional[str] = None
+    rejection_reason: Optional[str] = None
 
     @field_validator("vat_classification")
     @classmethod
@@ -142,10 +144,13 @@ class OcrCallbackPayload(BaseModel):
 
 def build_callback_payload(
     receipt_id: int,
-    fields: dict[str, Any],
-    confidence: float,
+    fields: dict[str, Any] | None = None,
+    confidence: float = 0.0,
     status: str = "completed",
     items: list[dict[str, Any]] | None = None,
+    error: str | None = None,
+    rejection_code: str | None = None,
+    rejection_reason: str | None = None,
 ) -> OcrCallbackPayload:
     """Map the internal field set onto the SERMS contract.
 
@@ -154,21 +159,25 @@ def build_callback_payload(
     country, currency, review reasons) is persisted on our side rather than
     transmitted and discarded.
     """
+    fields_dict = fields or {}
     return OcrCallbackPayload(
         receipt_id=receipt_id,
-        vendor_name=fields.get("vendor_name"),
-        transaction_date=fields.get("transaction_date"),
-        total_amount=fields.get("total_amount"),
-        vat_amount=fields.get("tax_amount"),
-        tin=fields.get("vendor_tax_id"),
-        invoice_number=fields.get("invoice_number"),
-        vat_classification=fields.get("vat_classification"),
-        currency=fields.get("currency"),
-        expense_category=fields.get("expense_category"),
-        location=fields.get("location"),
+        vendor_name=fields_dict.get("vendor_name"),
+        transaction_date=fields_dict.get("transaction_date"),
+        total_amount=fields_dict.get("total_amount"),
+        vat_amount=fields_dict.get("tax_amount"),
+        tin=fields_dict.get("vendor_tax_id"),
+        invoice_number=fields_dict.get("invoice_number"),
+        vat_classification=fields_dict.get("vat_classification"),
+        currency=fields_dict.get("currency"),
+        expense_category=fields_dict.get("expense_category"),
+        location=fields_dict.get("location"),
         ocr_confidence_score=max(0.0, min(float(confidence), 1.0)),
         items=_valid_items(items or []),
         status=status,
+        error=error,
+        rejection_code=rejection_code,
+        rejection_reason=rejection_reason or error,
     )
 
 

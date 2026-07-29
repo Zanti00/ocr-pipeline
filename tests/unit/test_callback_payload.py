@@ -123,3 +123,20 @@ class TestAbstention:
         )
         assert payload.total_amount is None
         assert payload.ocr_confidence_score == 0.45
+
+
+class TestQualityRejection:
+    def test_rejection_payload_fields(self):
+        payload = build_callback_payload(
+            receipt_id=42,
+            status="rejected",
+            error="Image is too blurry for accurate OCR. Please retake the photo with better focus and steady lighting.",
+            rejection_code="blurry",
+            rejection_reason="Image is too blurry for accurate OCR. Please retake the photo with better focus and steady lighting.",
+        )
+        assert payload.receipt_id == 42
+        assert payload.status == "rejected"
+        assert payload.rejection_code == "blurry"
+        assert payload.error == "Image is too blurry for accurate OCR. Please retake the photo with better focus and steady lighting."
+        assert payload.rejection_reason == payload.error
+
