@@ -46,3 +46,7 @@ class LLMProvider(ABC):
     async def verify_subtotal(self, ocr_text: str) -> float | None:
         """Extract the explicitly printed subtotal (net sales before tax) from the text."""
         return None
+
+    async def normalize_text(self, text: str, context: str) -> str:
+        """Correct spelling mistakes in a specific text snippet using full receipt context."""
+        return text

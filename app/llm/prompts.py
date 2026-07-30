@@ -43,7 +43,6 @@ CANDIDATES:
 {candidates}
 """
 
-
 CATEGORY_TIEBREAK_PROMPT = """Classify a business expense into exactly one category.
 
 Rules:
@@ -116,4 +115,25 @@ Rules:
 
 OCR TEXT:
 {ocr_text}
+"""
+
+TEXT_NORMALIZATION_PROMPT = """You are an intelligent receipt OCR text corrector.
+Your goal is to correct spelling mistakes in the given text snippet based on the surrounding receipt context.
+
+Rules:
+1. Fix obvious spelling errors (e.g., 'Res Coffee' -> 'Red Coffee', 'W@lmart' -> 'Walmart').
+2. DO NOT change the meaning of the word or fabricate new information.
+3. Preserve valid brand names, product codes, abbreviations, and units (e.g., 'OZ', 'LB').
+4. If the text appears perfectly valid or you are unsure, return the exact original text.
+
+Full Receipt Text for Context:
+---
+{context}
+---
+
+Text to Correct:
+{text}
+
+Respond with a single JSON object:
+{{"corrected_text": "the corrected text or original if no change is needed"}}
 """

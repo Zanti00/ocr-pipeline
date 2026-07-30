@@ -4,6 +4,12 @@ from typing import Any
 
 import httpx
 
+import json
+import logging
+from typing import Any
+
+import httpx
+
 from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.prompts import (
@@ -13,6 +19,7 @@ from app.llm.prompts import (
     LOCATION_SELECTION_PROMPT,
     RECEIPT_EXTRACTION_PROMPT,
     VENDOR_SELECTION_PROMPT,
+    TEXT_NORMALIZATION_PROMPT,
 )
 
 
@@ -173,3 +180,15 @@ class OllamaProvider(LLMProvider):
             return float(choice) if choice is not None else None
         except (ValueError, TypeError):
             return None
+
+    async def normalize_text(self, text: str, context: str) -> str:
+        if not text.strip():
+            return text
+        prompt = TEXT_NORMALIZATION_PROMPT.format(
+            text=text, context=context[:2000]
+        )
+        result = await self._generate(prompt, token_limit=SELECTION_TOKEN_LIMIT, timeout=60.0)
+        if not result:
+            return text
+        corrected = result.get("corrected_text")
+        return str(corrected).strip() if corrected else text

@@ -169,6 +169,9 @@ Defined in `docs/SAD.md § 5`. Materialized to `.agents/subagents/` (Antigravity
 | SAD-A3 | `serms-compliance-auditor` | Audits immutable logs, RBAC, BIR logic | On backend component diffs |
 | SAD-A4 | `reusability-auditor` | Enforces Axiom A-09 "Reuse Before You Write" | On any component diffs |
 
+### Agent Skills
+Whenever the `!skill` command is used, or if the user's prompt aligns with the use description of a skill, agents must automatically consider, find, and use the relevant skill located at `C:\Users\mobar\.agents\skills`.
+
 ---
 
 ## QA & testing

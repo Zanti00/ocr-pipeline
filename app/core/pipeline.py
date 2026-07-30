@@ -41,6 +41,7 @@ from app.embeddings.generator import EmbeddingGenerator
 from app.embeddings.similarity import find_similar_receipts
 from app.core.ocr_engine import rank_candidates
 from app.llm.factory import create_provider
+from app.core.postprocessing import normalize_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -270,9 +271,10 @@ async def _extract_with_assists(
             corrected_subtotal = await _ask_model_for_subtotal(bundle.combined_text)
 
     if vendor_choice is None and location_choice is None and embedder is None and semantics is None and corrected_subtotal is None:
+        await normalize_extraction(baseline, bundle)
         return baseline
 
-    return extract(
+    final_extraction = extract(
         bundle,
         llm_vendor_choice=vendor_choice,
         llm_location_choice=location_choice,
@@ -284,6 +286,9 @@ async def _extract_with_assists(
         category_tiebreaker=None,
         llm_subtotal=corrected_subtotal,
     )
+    
+    await normalize_extraction(final_extraction, bundle)
+    return final_extraction
 
 
 def _grounded_exclusive_basis(
