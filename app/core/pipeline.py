@@ -26,7 +26,7 @@ from PIL import Image
 from app.core.callback import send_callback
 from app.core.confidence import ConfidenceBreakdown, compute_confidence
 from app.core.extraction import Extraction, extract
-from app.core.ocr_engine import OcrBundle, read_pooled
+from app.core.ocr_engine import OcrBundle, rank_candidates, read_pooled
 from app.core.pdf_handler import pdf_to_images
 from app.core.verification import Verification, verify
 from app.api.schemas.ocr import build_callback_payload
@@ -37,6 +37,7 @@ from app.db.mongodb import MongoDBClient
 from app.db.postgres import AsyncSessionLocal
 from app.embeddings.generator import EmbeddingGenerator
 from app.embeddings.similarity import find_similar_receipts
+from app.core.ocr_engine import rank_candidates
 from app.llm.factory import create_provider
 
 logger = logging.getLogger(__name__)
@@ -133,9 +134,9 @@ async def process_receipt(
             duplicate_similarity=dup_score,
         )
         logger.info(
-            "Job %s complete: variant=%s psm=%s score=%.3f reasons=%s",
-            job_id, bundle.primary.variant, bundle.primary.psm, breakdown.score,
-            verification.reasons or "none",
+            "Job %s complete: engine=%s variant=%s psm=%s score=%.3f reasons=%s",
+            job_id, bundle.primary.engine, bundle.primary.variant, bundle.primary.psm,
+            breakdown.score, verification.reasons or "none",
         )
 
         if not await send_callback(callback_url, payload.model_dump()):
@@ -340,10 +341,35 @@ def _job_document(
     country, currency, review reasons and rejected values are only useful if we
     keep them - and they are what makes a score explainable after the fact.
     """
+    ranked_candidates = rank_candidates(bundle.all_readings)
+    runner_up = next(
+        (candidate for candidate in ranked_candidates if candidate is not bundle.primary),
+        None,
+    )
+    selection_margin = (
+        bundle.primary.score - runner_up.score if runner_up is not None else 0.0
+    )
+    candidate_summary = [
+        {
+            "engine": candidate.engine,
+            "variant": candidate.variant,
+            "psm": candidate.psm,
+            "anchor_score": round(candidate.score, 4),
+            "confidence": round(candidate.confidence, 4),
+        }
+        for candidate in ranked_candidates[:5]
+    ]
+
     return {
         "quality_override": force_process,
         "raw_ocr_text": bundle.combined_text,
-        "tesseract_confidence": round(bundle.confidence, 4),
+        # Kept as an engine-neutral field. The legacy field is populated only
+        # when Tesseract actually won, so it is not mislabeled for Paddle reads.
+        "ocr_confidence": round(bundle.confidence, 4),
+        "tesseract_confidence": (
+            round(bundle.confidence, 4)
+            if bundle.primary.engine == "tesseract" else None
+        ),
         "composite_confidence_score": breakdown.score,
         "confidence_breakdown": breakdown.as_dict(),
         "duplicate_check": {
@@ -353,11 +379,18 @@ def _job_document(
         },
         "extracted_data": verification.fields,
         "ocr_selection": {
+            "engine": bundle.primary.engine,
             "variant": bundle.primary.variant,
             "psm": bundle.primary.psm,
             "anchor_score": round(bundle.primary.score, 4),
-            "pooled_variants": [r.variant for r in bundle.supporting],
+            "confidence": round(bundle.primary.confidence, 4),
+            "selection_margin": round(selection_margin, 4),
+            "pooled_variants": [
+                f"{reading.engine}/{reading.variant}/psm{reading.psm}"
+                for reading in bundle.supporting
+            ],
             "candidates_evaluated": len(bundle.all_readings),
+            "candidate_summary": candidate_summary,
         },
         "verification": {
             "needs_manual_review": verification.needs_manual_review,

@@ -76,6 +76,14 @@ def run(path: Path, as_json: bool, show_variants: bool, receipt_id: int) -> int:
             "callback_payload": payload.model_dump(),
             "internal_fields": verification.fields,
             "confidence": breakdown.as_dict(),
+            "ocr_selection": {
+                "engine": bundle.primary.engine,
+                "variant": bundle.primary.variant,
+                "psm": bundle.primary.psm,
+                "anchor_score": round(bundle.primary.score, 4),
+                "confidence": round(bundle.primary.confidence, 4),
+                "candidates_evaluated": len(bundle.all_readings),
+            },
             "rejected": {k: str(v) for k, v in verification.rejected.items()},
             "evidence": result.evidence,
             "seconds": round(elapsed, 2),
@@ -92,16 +100,16 @@ def _report(path, bundle, result, verification, breakdown, payload, elapsed,
     print(f"\n{'=' * 74}")
     print(f"  {path.name}")
     print(f"{'=' * 74}")
-    print(f"  OCR       {len(bundle.all_readings)} passes, selected "
-          f"{bundle.primary.variant}/psm{bundle.primary.psm} "
+    print(f"  OCR       {len(bundle.all_readings)} candidates, selected "
+          f"{bundle.primary.engine}/{bundle.primary.variant}/psm{bundle.primary.psm} "
           f"(anchors {bundle.primary.score:.2f}, word conf {bundle.confidence:.2f})")
-    print(f"  pooled    {', '.join(r.variant for r in bundle.supporting) or 'none'}")
+    print(f"  pooled    {', '.join(r.label for r in bundle.supporting) or 'none'}")
     print(f"  elapsed   {elapsed:.1f}s")
 
     if show_variants:
         print("\n  variant scores")
         for reading in sorted(bundle.all_readings, key=lambda r: -r.score)[:8]:
-            print(f"    {reading.variant:<10} psm{reading.psm:<3} "
+            print(f"    {reading.engine:<10} {reading.variant:<10} psm{reading.psm:<3} "
                   f"anchors {reading.score:5.2f}  conf {reading.confidence:.2f}")
 
     print("\n  CALLBACK TO SERMS")

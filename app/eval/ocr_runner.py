@@ -23,6 +23,8 @@ class OcrResult:
     text: str
     confidence: float
     anchor_score: float = 0.0
+    engine: str | None = None
+    candidate_count: int = 0
 
     @property
     def char_count(self) -> int:
@@ -45,25 +47,29 @@ def run_optimized(image_path: Path) -> OcrResult:
     with Image.open(image_path) as img:
         best, _ = read_best(img, lang="eng")
     return OcrResult(
-        label=f"optimized({best.variant}/psm{best.psm})",
+        label=f"optimized({best.engine}/{best.variant}/psm{best.psm})",
         text=best.text,
         confidence=best.confidence,
         anchor_score=best.score,
+        engine=best.engine,
+        candidate_count=1,
     )
 
 
 def run_pooled(image_path: Path, pool_size: int = 4) -> OcrResult:
-    """New path with candidate pooling across the top distinct variants."""
+    """Run the production candidate-selected OCR path."""
     with Image.open(image_path) as img:
         bundle = read_pooled(img, lang="eng", pool_size=pool_size)
     labels = "+".join(
-        [bundle.primary.variant] + [r.variant for r in bundle.supporting]
+        [bundle.primary.label] + [reading.label for reading in bundle.supporting]
     )
     return OcrResult(
-        label=f"pooled({labels})",
+        label=f"candidate({labels})",
         text=bundle.combined_text,
         confidence=bundle.confidence,
         anchor_score=bundle.primary.score,
+        engine=bundle.primary.engine,
+        candidate_count=len(bundle.all_readings),
     )
 
 

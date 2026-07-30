@@ -14,7 +14,8 @@ Consumer (SERMS/PRS)
         ▼
    FastAPI API  ──queue──►  Celery Worker
         │                        │
-        │                   Tesseract OCR
+        │                   PaddleOCR + Tesseract
+        │                   Candidate selection
         │                   Ollama (Qwen2.5 1.5B)
         │                   Embeddings (MiniLM)
         │                        │
@@ -31,7 +32,7 @@ Consumer (SERMS/PRS)
 | **MongoDB** | Job status, OCR results, extracted fields |
 | **PostgreSQL + pgvector** | Receipt text embeddings / similarity search |
 | **Ollama** | Local LLM for structured extraction (`qwen2.5:1.5b`) |
-| **Tesseract + OpenCV** | OCR + image preprocessing |
+| **PaddleOCR + Tesseract** | Candidate-based OCR selection with pinned Paddle 3.7-compatible runtime and full Tesseract variant cross-reference |
 | **Sentence-Transformers** | Embeddings (`all-MiniLM-L6-v2`) |
 
 ## Prerequisites
@@ -170,7 +171,7 @@ Interactive OpenAPI docs (when API is up): http://localhost:8010/docs
 For each queued job the worker:
 
 1. Downloads the file from `file_url` (image or PDF)
-2. Preprocesses with OpenCV; runs Tesseract OCR
+2. Preprocesses with OpenCV; runs PaddleOCR and Tesseract across the existing candidate pool, selecting the strongest reading by receipt-aware anchor scoring while retaining all candidates for reconciliation
 3. Extracts structured fields via Ollama (vendor, date, amounts, TIN, line items, category, …)
 4. Validates TIN and classifies VAT (BIR rules)
 5. Computes a composite confidence score
@@ -220,6 +221,7 @@ tests/              # pytest suite
 | API 401 | Bearer token must match `SERMS_API_KEY` or `PRS_API_KEY` in `.env` |
 | pgvector / embedding errors | Run `alembic upgrade head` inside `api` |
 | Callback never arrives | Worker logs; consumer URL reachable from `ocr_network` / shared network |
+| PaddleOCR does not appear in worker logs | Rebuild the worker image after dependency changes: `docker compose up -d --build worker api`; verify with `docker compose exec -T worker python -c "import paddle, paddleocr; print('PaddleOCR installed')"` |
 
 ---
 

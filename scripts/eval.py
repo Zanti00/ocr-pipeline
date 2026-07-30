@@ -38,6 +38,8 @@ VARIANTS = {
     "raw6": lambda path: run_raw(path, psm=6),
     "raw11": lambda path: run_raw(path, psm=11),
     "optimized": run_optimized,
+    "candidate": run_pooled,
+    # Backward-compatible name for existing evaluation commands.
     "pooled": run_pooled,
 }
 

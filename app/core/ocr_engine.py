@@ -1,21 +1,19 @@
-"""Tesseract execution.
+"""Receipt OCR candidate generation and selection.
 
-Two things changed from the original single-pass implementation:
-
-* several preprocessing variants and page-segmentation modes are tried, and the
-  reading that surfaces the most domain anchors wins. Measurement drove this:
-  receipt 2's entire amount column is invisible under the default PSM 3 and
-  appears in full under PSM 6.
-* word bounding boxes are retained. Money values are positional - pairing a
-  'TOTAL' label with the number on the same line is a geometry problem, and
-  solving it in code removes the need to ask a 1.5B model to read digits.
+The OCR stage runs PaddleOCR once and Tesseract across preprocessing variants and
+page-segmentation modes. Their readings are scored using receipt-aware anchors;
+the strongest existing candidate becomes primary while all successful readings
+remain available for downstream reconciliation.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Literal, Sequence
+
+import numpy as np
 
 import pytesseract
 from PIL import Image
@@ -24,6 +22,44 @@ from app.core.anchors import AnchorScore, score_text
 from app.core.preprocessing import Variant, build_variants
 
 logger = logging.getLogger(__name__)
+
+# Paddle is optional at import time so the service can still start and use the
+# Tesseract fallback when an image has not yet been rebuilt with PaddleOCR.
+try:
+    from paddleocr import PaddleOCR
+except Exception as exc:  # pragma: no cover - depends on the runtime image
+    PaddleOCR = None  # type: ignore[assignment]
+    logger.warning("PaddleOCR unavailable; using Tesseract fallback: %s", exc)
+
+paddle_ocr = None
+_paddle_init_attempted = False
+
+
+def _get_paddle_ocr():
+    """Initialize Paddle lazily so a missing model cannot break module import."""
+    global _paddle_init_attempted, paddle_ocr
+    if paddle_ocr is not None:
+        return paddle_ocr
+    if _paddle_init_attempted:
+        return None
+    _paddle_init_attempted = True
+    if PaddleOCR is None:
+        return None
+    try:
+        try:
+            paddle_ocr = PaddleOCR(
+                lang="en",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                enable_mkldnn=False,
+            )
+        except (TypeError, ValueError):
+            # PaddleOCR 2.x does not know the 3.x pipeline options.
+            paddle_ocr = PaddleOCR(use_angle_cls=True, lang="en")
+    except Exception as exc:  # pragma: no cover - depends on runtime/model
+        logger.warning("PaddleOCR initialization failed; using Tesseract fallback: %s", exc)
+    return paddle_ocr
 
 DEFAULT_PSMS: tuple[int, ...] = (6, 4, 11)
 
@@ -64,12 +100,18 @@ class OcrReading:
     confidence: float
     variant: str
     psm: int
+    engine: Literal["paddle", "tesseract"] = "tesseract"
     anchors: AnchorScore | None = None
     lines: list[list[Word]] = field(default_factory=list)
 
     @property
     def score(self) -> float:
         return self.anchors.total if self.anchors else 0.0
+
+    @property
+    def label(self) -> str:
+        """Stable, engine-aware label for logs and audit metadata."""
+        return f"{self.engine}/{self.variant}/psm{self.psm}"
 
 
 def read_variant(image: Image.Image, psm: int, lang: str = "eng") -> OcrReading:
@@ -105,7 +147,7 @@ def read_variant(image: Image.Image, psm: int, lang: str = "eng") -> OcrReading:
     text = _render_text(words)
     reading = OcrReading(
         text=text, words=words, confidence=mean, variant="?", psm=psm,
-        lines=group_lines(words),
+        engine="tesseract", lines=group_lines(words),
     )
     reading.anchors = score_text(text, mean)
     return reading
@@ -177,7 +219,7 @@ def read_best(
     psms: Sequence[int] = DEFAULT_PSMS,
     variants: Sequence[Variant] | None = None,
 ) -> tuple[OcrReading, list[OcrReading]]:
-    """Try every variant x PSM combination and return the strongest reading.
+    """Try every Tesseract variant x PSM combination.
 
     Returns ``(best, all_candidates)``. Roughly 15 CPU passes per receipt, which
     fits comfortably inside the async Celery budget - nothing is waiting on a
@@ -197,12 +239,199 @@ def read_best(
     if not candidates:
         raise RuntimeError("All OCR variants failed")
 
-    best = max(candidates, key=lambda r: (r.score, r.confidence, len(r.text)))
+    best = select_primary(candidates)
     logger.info(
-        "OCR selected variant=%s psm=%s score=%.3f conf=%.3f",
+        "Tesseract best candidate variant=%s psm=%s score=%.3f conf=%.3f",
         best.variant, best.psm, best.score, best.confidence,
     )
     return best, candidates
+
+
+def rank_candidates(candidates: Sequence[OcrReading]) -> list[OcrReading]:
+    """Rank OCR candidates without adding another OCR or extraction pass.
+
+    Anchor coverage is the primary signal. Confidence and text length only break
+    ties because engine confidence values are not directly calibrated across
+    PaddleOCR and Tesseract.
+    """
+    return sorted(
+        (candidate for candidate in candidates if candidate.text.strip()),
+        key=lambda candidate: (
+            -candidate.score,
+            -candidate.confidence,
+            -len(candidate.text),
+        ),
+    )
+
+
+def select_primary(candidates: Sequence[OcrReading]) -> OcrReading:
+    """Select the strongest available OCR result from either engine."""
+    ranked = rank_candidates(candidates)
+    if not ranked:
+        raise RuntimeError("All OCR candidates were empty")
+    return ranked[0]
+
+
+def _box_bounds(box) -> tuple[int, int, int, int]:
+    """Normalize Paddle's polygon or ``[left, top, right, bottom]`` box."""
+    points = np.asarray(box)
+    if points.ndim == 1 and len(points) == 4:
+        left, top, right, bottom = points
+    else:
+        points = points.reshape(-1, 2)
+        left = points[:, 0].min()
+        top = points[:, 1].min()
+        right = points[:, 0].max()
+        bottom = points[:, 1].max()
+    return int(left), int(top), int(right), int(bottom)
+
+
+def _append_paddle_line(
+    words: list[Word],
+    text: str,
+    confidence: float,
+    box,
+    line_number: int,
+    word_texts: Sequence[str] | None = None,
+    word_boxes=None,
+) -> None:
+    """Append one Paddle line, using native word boxes where available."""
+    text = str(text).strip()
+    if not text:
+        return
+    confidence = max(0.0, min(float(confidence), 1.0))
+
+    if word_texts and word_boxes is not None and len(word_texts) == len(word_boxes):
+        for token, token_box in zip(word_texts, word_boxes):
+            left, top, right, bottom = _box_bounds(token_box)
+            words.append(Word(
+                text=str(token),
+                confidence=confidence,
+                left=left,
+                top=top,
+                width=max(1, right - left),
+                height=max(1, bottom - top),
+                block=0,
+                par=0,
+                line=line_number,
+            ))
+        return
+
+    left, top, right, bottom = _box_bounds(box)
+    line_width = max(1, right - left)
+    for match in re.finditer(r"\S+", text):
+        token_left = left + round(line_width * match.start() / len(text))
+        token_right = left + round(line_width * match.end() / len(text))
+        words.append(Word(
+            text=match.group(),
+            confidence=confidence,
+            left=token_left,
+            top=top,
+            width=max(1, token_right - token_left),
+            height=max(1, bottom - top),
+            block=0,
+            par=0,
+            line=line_number,
+        ))
+
+
+def read_paddle(image: Image.Image) -> OcrReading:
+    """Run PaddleOCR across its legacy 2.x and pipeline 3.x APIs."""
+    engine = _get_paddle_ocr()
+    if engine is None:
+        raise RuntimeError("PaddleOCR is not initialized")
+
+    img_array = np.array(image.convert("RGB"))
+    words: list[Word] = []
+    confidences: list[float] = []
+
+    if hasattr(engine, "predict"):
+        # PaddleOCR 3.x returns OCRResult mappings. Disabling optional document
+        # stages avoids the CPU PIR/oneDNN path that is not supported by all
+        # Paddle runtime builds and is unnecessary for receipt crops.
+        result = engine.predict(
+            img_array,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            return_word_box=True,
+        )
+        first = result[0] if result else None
+        if first is not None and hasattr(first, "get"):
+            texts = first.get("rec_texts", [])
+            scores = first.get("rec_scores", [])
+            boxes = first.get("rec_boxes", [])
+            word_texts = first.get("text_word", [])
+            word_boxes = first.get("text_word_boxes", [])
+            for idx, text in enumerate(texts):
+                if idx >= len(boxes):
+                    continue
+                score = scores[idx] if idx < len(scores) else 0.0
+                line_words = word_texts[idx] if idx < len(word_texts) else None
+                line_boxes = word_boxes[idx] if idx < len(word_boxes) else None
+                _append_paddle_line(
+                    words, text, score, boxes[idx], idx, line_words, line_boxes
+                )
+                confidences.append(max(0.0, min(float(score), 1.0)))
+    else:
+        # PaddleOCR 2.x returns ``[[[polygon, (text, confidence)], ...]]``.
+        img_bgr = img_array[:, :, ::-1]
+        result = engine.ocr(img_bgr, cls=True)
+        for idx, line in enumerate(result[0] if result and result[0] else []):
+            try:
+                box, (text, confidence) = line
+            except (TypeError, ValueError):
+                logger.warning("PaddleOCR returned an unsupported line shape")
+                continue
+            _append_paddle_line(words, text, confidence, box, idx)
+            confidences.append(max(0.0, min(float(confidence), 1.0)))
+
+    if not words:
+        # A successful model call with no detections is not successful OCR. Let
+        # read_pooled run the complete Tesseract search instead.
+        raise RuntimeError("PaddleOCR returned no text")
+
+    mean = sum(confidences) / len(confidences)
+    text_content = _render_text(words)
+    reading = OcrReading(
+        text=text_content,
+        words=words,
+        confidence=mean,
+        variant="source",
+        psm=0,
+        engine="paddle",
+        lines=group_lines(words),
+    )
+    reading.anchors = score_text(text_content, mean)
+    return reading
+
+
+def _supporting_readings(
+    candidates: Sequence[OcrReading],
+    primary: OcrReading,
+    pool_size: int,
+) -> list[OcrReading]:
+    """Choose strong, diverse readings excluding the selected primary."""
+    supporting: list[OcrReading] = []
+    seen_variants: set[str] = {primary.variant}
+    seen_text: set[str] = {primary.text}
+    ranked = rank_candidates(candidates)
+    target = max(0, pool_size - 1)
+
+    # Prefer different preprocessing variants/engines first, then fill remaining
+    # slots with another candidate. Identical OCR text is pooled only once.
+    for distinct_variants_only in (True, False):
+        for reading in ranked:
+            if len(supporting) >= target:
+                return supporting
+            if reading is primary or reading.text in seen_text:
+                continue
+            if distinct_variants_only and reading.variant in seen_variants:
+                continue
+            supporting.append(reading)
+            seen_variants.add(reading.variant)
+            seen_text.add(reading.text)
+    return supporting
 
 
 def read_pooled(
@@ -211,25 +440,57 @@ def read_pooled(
     psms: Sequence[int] = DEFAULT_PSMS,
     pool_size: int = 4,
 ) -> OcrBundle:
-    """Read a receipt and keep the top ``pool_size`` distinct readings."""
-    best, candidates = read_best(image, lang=lang, psms=psms)
-    ranked = sorted(candidates, key=lambda r: (-r.score, -r.confidence))
+    """Run PaddleOCR and Tesseract, then select the best existing candidate.
 
-    supporting: list[OcrReading] = []
-    seen_variants: set[str] = {best.variant}
-    for reading in ranked:
-        if len(supporting) >= pool_size - 1:
-            break
-        if reading is best:
-            continue
-        # Prefer diversity: a different preprocessing variant is more likely to
-        # recover a field the primary missed than the same variant at another PSM.
-        if reading.variant in seen_variants:
-            continue
-        seen_variants.add(reading.variant)
-        supporting.append(reading)
+    The candidate pool does not add OCR work: Paddle runs once and Tesseract
+    still runs the existing variant x PSM search. All successful readings remain
+    available for downstream amount and item reconciliation.
+    """
+    candidates: list[OcrReading] = []
 
-    return OcrBundle(primary=best, supporting=supporting, all_readings=candidates)
+    try:
+        paddle_candidate = read_paddle(image)
+        candidates.append(paddle_candidate)
+        logger.info(
+            "PaddleOCR succeeded (score=%.3f, conf=%.3f)",
+            paddle_candidate.score,
+            paddle_candidate.confidence,
+        )
+    except Exception as exc:
+        logger.warning("PaddleOCR failed; continuing with Tesseract: %s", exc)
+
+    try:
+        _, tesseract_candidates = read_best(image, lang=lang, psms=psms)
+        candidates.extend(
+            candidate for candidate in tesseract_candidates if candidate.text.strip()
+        )
+    except Exception as exc:
+        logger.warning("Tesseract OCR failed; continuing with PaddleOCR: %s", exc)
+
+    if not candidates:
+        raise RuntimeError("PaddleOCR and Tesseract produced no OCR candidates")
+
+    primary = select_primary(candidates)
+    supporting = _supporting_readings(candidates, primary, pool_size)
+    runner_up = next(
+        (candidate for candidate in rank_candidates(candidates) if candidate is not primary),
+        None,
+    )
+    margin = primary.score - runner_up.score if runner_up else 0.0
+    logger.info(
+        "OCR selected engine=%s variant=%s psm=%s score=%.3f conf=%.3f margin=%.3f",
+        primary.engine,
+        primary.variant,
+        primary.psm,
+        primary.score,
+        primary.confidence,
+        margin,
+    )
+    return OcrBundle(
+        primary=primary,
+        supporting=supporting,
+        all_readings=candidates,
+    )
 
 
 def extract_text(image: Image.Image, lang: str = "eng") -> tuple[str, float]:

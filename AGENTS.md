@@ -30,7 +30,7 @@ OCR Pipeline is a standalone Python/FastAPI microservice providing AI-powered re
 | **NoSQL Database** | MongoDB (`motor`) | Job status, raw OCR results, extracted fields, BIR validation, confidence scores |
 | **Vector Database** | PostgreSQL + `pgvector` (`sqlalchemy`, `asyncpg`) | 384-dim receipt embeddings; cosine similarity duplicate detection |
 | **Local LLM** | Ollama (`qwen2.5:1.5b`) | Structured field extraction from raw OCR text |
-| **OCR Engine** | Tesseract (`pytesseract`) + OpenCV | Image pre-processing + raw text extraction |
+| **OCR Engine** | PaddleOCR + Tesseract (`paddleocr`, `pytesseract`) + OpenCV | Image pre-processing + PaddleOCR primary + Tesseract fallback |
 | **Embeddings** | Sentence-Transformers (`all-MiniLM-L6-v2`) | 384-dim vector generation |
 | **ML Anomaly Model** | Scikit-learn (`RandomForestClassifier`) | Receipt anomaly risk scoring (0.0–1.0) |
 | **Settings** | Pydantic Settings | Environment variable management |
@@ -85,7 +85,7 @@ Each `process_receipt_task` Celery job runs these stages in order:
 
 1. **Download** — fetch file from `file_url` (image or PDF)
 2. **Pre-process** — OpenCV (grayscale, deskew, adaptive thresholding, denoising)
-3. **OCR** — Tesseract extracts raw text; text quality scored (`app/core/textquality.py`)
+3. **OCR** — PaddleOCR extracts primary text & geometry; Tesseract runs fallback passes; text quality scored (`app/core/textquality.py`)
 4. **LLM extraction** — Ollama `qwen2.5:1.5b` parses vendor, date, total, VAT, TIN, invoice number, line items, category
 5. **BIR validation** — `app/core/bir_validator.py` validates TIN format, VAT classification
 6. **Confidence scoring** — `app/core/confidence.py` computes a composite score (≥ 0.75 = acceptable)
@@ -107,7 +107,7 @@ Each `process_receipt_task` Celery job runs these stages in order:
 | `receipt_id` | `Integer` | Caller-system receipt ID |
 | `source_service` | `String(50)` | `"serms"` or `"prs"` |
 | `embedding` | `Vector(384)` | Dense text embedding |
-| `receipt_text` | `Text` | Raw Tesseract output |
+| `receipt_text` | `Text` | Raw combined OCR output |
 | `created_at` | `DateTime(tz)` | UTC timestamp |
 
 Indices: `idx_embeddings_source_service`, `idx_embeddings_created_at`, `idx_embeddings_vector` (IVFFlat/HNSW, optional).

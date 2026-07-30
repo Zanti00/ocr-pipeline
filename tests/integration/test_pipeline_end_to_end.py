@@ -154,6 +154,10 @@ async def test_audit_document_retains_the_wider_internal_model(harness, monkeypa
     document = harness.job_document
 
     assert document["ocr_selection"]["candidates_evaluated"] >= 10
+    assert document["ocr_selection"]["engine"] in {"paddle", "tesseract"}
+    assert document["ocr_selection"]["confidence"] >= 0.0
+    assert "candidate_summary" in document["ocr_selection"]
+    assert document["ocr_confidence"] >= 0.0
     assert document["locale"]["country"] == "US"
     assert document["locale"]["currency"] == "USD"
     assert document["reconciliation"]["reconciled"] is True
