@@ -23,6 +23,9 @@ def process_receipt_task(
     source_service: str,
     force_process: bool = False,
     file_urls: list[str] | None = None,
+    country: str | None = None,
+    currency: str | None = None,
+    location: str | None = None,
 ):
     loop = get_loop()
     try:
@@ -35,6 +38,9 @@ def process_receipt_task(
                 source_service,
                 force_process=force_process,
                 file_urls=file_urls,
+                country=country,
+                currency=currency,
+                location=location,
             )
         )
     except Exception as exc:

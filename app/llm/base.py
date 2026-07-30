@@ -39,3 +39,10 @@ class LLMProvider(ABC):
         """Analyze line-item structures (quantity, name, price) from receipt lines."""
         return None
 
+    async def analyze_financial_semantics(self, ocr_text: str) -> dict | None:
+        """Classify tax basis/currency context without extracting any amounts."""
+        return None
+
+    async def verify_subtotal(self, ocr_text: str) -> float | None:
+        """Extract the explicitly printed subtotal (net sales before tax) from the text."""
+        return None

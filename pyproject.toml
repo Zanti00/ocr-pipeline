@@ -26,6 +26,11 @@ dependencies = [
     "paddleocr==3.7.0"
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "live_llm: opt-in tests requiring a reachable Ollama service",
+]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2.1",

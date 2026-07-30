@@ -12,8 +12,10 @@ than validated.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
+from app.core.financial_semantics import TAX_BASES, UNKNOWN
 from app.core.layout import LayoutScan
 from app.core.locale import LocaleGuess
 from app.core.numbers import normalize_money
@@ -23,7 +25,8 @@ TOLERANCE = 0.02
 PLAUSIBLE_RATE_RANGE = (0.0, 0.30)
 
 MONEY_FIELDS = (
-    "net_sales", "tax_amount", "total_sales", "service_charge", "total_amount",
+    "net_sales", "tax_amount", "total_sales", "service_charge", "discount_amount",
+    "withholding_tax", "total_amount",
 )
 
 
@@ -38,35 +41,46 @@ class MoneyResult:
     tax_type: str | None = None
     vat_registered: bool = True
     derivations: set[str] = field(default_factory=set)
-    """Which gaps were filled arithmetically, so tautologies can be excluded.
-
-    An identity that compares a derived value against the values it was derived
-    from always passes and proves nothing. Counting those as successful
-    reconciliation inflates confidence on receipts whose figures were never
-    actually cross-checked - which is the opposite of what the gate is for.
-    """
+    tax_basis: str = UNKNOWN
+    reported_total: float | None = None
+    computed_total: float | None = None
+    discrepancy: float | None = None
+    financial_reconciliation_status: str = "unresolved"
+    needs_manual_review: bool = False
+    tax_breakdown: list[dict[str, object]] = field(default_factory=list)
 
     def get(self, name: str) -> float | None:
         return self.values.get(name)
 
 
 def resolve_money(
-    scan: LayoutScan, locale: LocaleGuess, vat_registered: bool = True
+    scan: LayoutScan,
+    locale: LocaleGuess,
+    vat_registered: bool = True,
+    tax_basis: str | None = None,
 ) -> MoneyResult:
-    """Resolve the money fields, deriving gaps where the arithmetic allows.
-
-    ``vat_registered`` gates the PH VAT derivations. A non-VAT sales invoice
-    carries no VAT at all, so dividing its total by 1.12 invents both a net figure
-    and a tax figure - and because derived values are exempt from grounding, those
-    inventions shipped at 0.99 confidence. On a 75.00 non-VAT invoice the pipeline
-    reported net 66.96 and tax 8.04, neither of which exists.
-    """
+    """Resolve money with an explicit/validated tax basis and safe abstention."""
     country = locale.country
     result = MoneyResult()
     result.vat_registered = vat_registered
+    result.tax_basis = tax_basis if tax_basis in TAX_BASES else (
+        "inclusive" if country == "PH" else "exclusive" if country == "US" else UNKNOWN
+    )
 
     for name in MONEY_FIELDS:
-        labeled = scan.first(name)
+        candidates = scan.all(name)
+        if name == "tax_amount" and candidates:
+            parsed = [normalize_money(item.raw_token, country) for item in candidates]
+            values = [value for value in parsed if value is not None]
+            if values:
+                result.values[name] = round(sum(values), 2)
+                result.tax_breakdown = [
+                    {"amount": value, "label": item.label, "evidence": item.evidence}
+                    for item, value in zip(candidates, parsed) if value is not None
+                ]
+                result.evidence[name] = "; ".join(item.evidence for item in candidates)
+                continue
+        labeled = candidates[0] if candidates else None
         if labeled is None:
             result.values[name] = None
             continue
@@ -75,88 +89,103 @@ def resolve_money(
         if value is not None:
             result.evidence[name] = labeled.evidence
 
-    _fill_gaps(result, scan, country, vat_registered)
-    _reconcile(result, country)
+    result.reported_total = result.get("total_amount")
+    _fill_gaps(result, scan, country, vat_registered, result.tax_basis)
+    _reconcile(result, country, result.tax_basis)
+    if result.financial_reconciliation_status == "unresolved":
+        result.financial_reconciliation_status = "reconciled" if result.reconciled else "unresolved"
     return result
 
 
 def _fill_gaps(
-    result: MoneyResult, scan: LayoutScan, country: str | None, vat_registered: bool
+    result: MoneyResult, scan: LayoutScan, country: str | None, vat_registered: bool,
+    tax_basis: str,
 ) -> None:
-    """Derive missing figures arithmetically instead of letting a model guess.
-
-    Deterministic arithmetic beats a 1.5B model at maths every time, and a derived
-    value is auditable in a way a generated one is not.
-    """
     net = result.get("net_sales")
     tax = result.get("tax_amount")
     total_sales = result.get("total_sales")
     total = result.get("total_amount")
-    service = result.get("service_charge")
-
+    service = result.get("service_charge") or 0.0
     is_ph = country == "PH"
 
     if is_ph and not vat_registered:
-        # Non-VAT invoice: sales are simply the amount, with no tax component to
-        # split out. Never manufacture one.
         if net is None and total_sales is not None:
             result.values["net_sales"] = total_sales
             result.derived.add("net_sales")
             result.derivations.add("net_equals_sales_non_vat")
-            result.evidence["net_sales"] = (
-                f"derived: equals total sales {total_sales} (non-VAT, no tax)"
-            )
-        is_ph = False  # skip every VAT-specific derivation below
+            result.evidence["net_sales"] = f"derived: equals total sales {total_sales} (non-VAT, no tax)"
+        is_ph = False
 
-    if is_ph and net is None and total_sales is not None:
+    # PH inclusive is the only country prior. It may still be overridden by
+    # explicit wording or validated semantics supplied by the caller.
+    if is_ph and tax_basis == "inclusive" and net is None and total_sales is not None:
         net = round(total_sales / (1 + PH_VAT_RATE), 2)
         result.values["net_sales"] = net
         result.derived.add("net_sales")
         result.derivations.add("net_from_sales")
         result.evidence["net_sales"] = f"derived: {total_sales} / 1.12"
 
-    if is_ph and tax is None and net is not None:
+    if is_ph and tax_basis == "inclusive" and tax is None and net is not None:
         tax = round(net * PH_VAT_RATE, 2)
         result.values["tax_amount"] = tax
         result.derived.add("tax_amount")
         result.derivations.add("tax_from_net")
         result.evidence["tax_amount"] = f"derived: {net} x 0.12"
 
-    if total_sales is None and net is not None and tax is not None:
+    if tax_basis == "exclusive" and total_sales is None and net is not None and tax is not None:
         total_sales = round(net + tax, 2)
         result.values["total_sales"] = total_sales
         result.derived.add("total_sales")
         result.derivations.add("sales_from_net_tax")
         result.evidence["total_sales"] = f"derived: {net} + {tax}"
 
-    if total_sales is None and tax is None and total is not None and service is None:
-        # No tax and no service charge, so sales equal the amount paid. Common on
-        # POS receipts that print a single 'Total' line and nothing else.
-        result.values["total_sales"] = total
+    if tax_basis == "inclusive" and total_sales is None and net is not None and tax is not None:
+        total_sales = round(net + tax, 2)
+        result.values["total_sales"] = total_sales
         result.derived.add("total_sales")
-        result.derivations.add("sales_from_total")
-        result.evidence["total_sales"] = f"derived: equals total {total} (no tax/charges)"
-        total_sales = total
+        result.derivations.add("sales_from_net_tax")
+        result.evidence["total_sales"] = f"derived: inclusive gross from printed net and tax"
 
-    if total is None:
-        if total_sales is not None:
-            candidate = round(total_sales + (service or 0.0), 2)
-            if _token_present(candidate, scan, country):
-                result.values["total_amount"] = candidate
+    # Only an exclusive receipt with independently printed net/subtotal and tax
+    # can authorize a computed callback total. Unknown semantics never substitute.
+    grounded_net = net is not None and "net_sales" not in result.derived
+    grounded_tax = tax is not None and "tax_amount" not in result.derived
+    if tax_basis == "exclusive" and grounded_net and grounded_tax:
+        computed = round(net + tax + service, 2)
+        result.computed_total = computed
+        result.discrepancy = round((result.reported_total - computed), 2) if result.reported_total is not None else None
+        if total is None:
+            result.values["total_amount"] = computed
+            result.derived.add("total_amount")
+            result.derivations.add("total_from_net_tax_exclusive")
+            result.evidence["total_amount"] = f"computed: net {net} + tax {tax} + service {service}"
+            result.financial_reconciliation_status = "computed"
+        elif abs(total - computed) <= TOLERANCE:
+            result.financial_reconciliation_status = "reported"
+        else:
+            reported = scan.first("total_amount")
+            strong = bool(reported and reported.confidence >= 0.80 and re.search(
+                r"total|amount due|grand|balance", reported.label, re.IGNORECASE
+            ))
+            result.needs_manual_review = True
+            result.financial_reconciliation_status = "reported_conflict" if strong else "computed_conflict"
+            if not strong:
+                result.values["total_amount"] = computed
                 result.derived.add("total_amount")
-                result.derivations.add("total_from_sales")
-                result.evidence["total_amount"] = (
-                    f"derived: {total_sales} + service {service or 0.0}"
-                )
-        elif net is not None and tax is not None:
-            candidate = round(net + tax + (service or 0.0), 2)
-            if _token_present(candidate, scan, country):
-                result.values["total_amount"] = candidate
-                result.derived.add("total_amount")
-                result.derivations.add("total_from_net_tax")
-                result.evidence["total_amount"] = (
-                    f"derived: net {net} + tax {tax} + service {service or 0.0}"
-                )
+                result.derivations.add("total_from_net_tax_exclusive")
+                result.evidence["total_amount"] = f"computed despite weak reported conflict: {computed}"
+        return
+
+    # Inclusive totals are already gross: never add tax to total_sales. A printed
+    # sales total may be carried to callback only when a money token supports it.
+    if total is None and tax_basis == "inclusive" and total_sales is not None:
+        candidate = round(total_sales + service, 2)
+        if _token_present(candidate, scan, country):
+            result.values["total_amount"] = candidate
+            result.derived.add("total_amount")
+            result.derivations.add("total_from_sales")
+            result.evidence["total_amount"] = f"derived: inclusive total sales {total_sales} + service {service}"
+    # Unknown basis intentionally leaves total_amount untouched.
 
 
 def _token_present(value: float, scan: LayoutScan, country: str | None) -> bool:
@@ -168,103 +197,66 @@ def _token_present(value: float, scan: LayoutScan, country: str | None) -> bool:
     return False
 
 
-def _reconcile(result: MoneyResult, country: str | None) -> None:
+def _reconcile(result: MoneyResult, country: str | None, tax_basis: str) -> None:
     net = result.get("net_sales")
     tax = result.get("tax_amount")
     total_sales = result.get("total_sales")
     total = result.get("total_amount")
     service = result.get("service_charge") or 0.0
-
     checks: list[bool] = []
     derivations = result.derivations
 
-    if country == "PH":
-        # tax_type is set later from the VAT classification, because it describes
-        # the vendor's registration rather than whether an amount was legible. A
-        # VAT-registered OR is still a VAT document when its handwritten figures
-        # cannot be read.
-        if net is not None and tax is not None:
-            result.tax_rate = PH_VAT_RATE
-            if "tax_from_net" in derivations:
-                # tax was computed as net x 0.12, so re-checking it is circular.
-                result.reconciliation_notes.append(
-                    "PH VAT identity skipped: tax was derived from net"
-                )
-            else:
-                ok = abs(net * PH_VAT_RATE - tax) <= max(TOLERANCE, net * 0.001)
-                checks.append(ok)
-                result.reconciliation_notes.append(
-                    f"PH VAT identity net*0.12={net * PH_VAT_RATE:.2f} vs tax={tax:.2f}"
-                    f" -> {'ok' if ok else 'FAIL'}"
-                )
-    elif country is not None:
-        if tax is None:
-            result.tax_type = None
-        else:
-            result.tax_type = "SALES_TAX" if country == "US" else "TAX"
-        if net and tax is not None and net > 0:
-            rate = tax / net
-            plausible = PLAUSIBLE_RATE_RANGE[0] <= rate <= PLAUSIBLE_RATE_RANGE[1]
+    if tax is not None and net is not None and net > 0:
+        rate = tax / net
+        plausible = PLAUSIBLE_RATE_RANGE[0] <= rate <= PLAUSIBLE_RATE_RANGE[1]
+        result.tax_rate = PH_VAT_RATE if country == "PH" and tax_basis == "inclusive" else round(rate, 4)
+        if country == "PH" and tax_basis == "inclusive" and "tax_from_net" not in derivations:
+            checks.append(abs(net * PH_VAT_RATE - tax) <= max(TOLERANCE, net * 0.001))
+            result.reconciliation_notes.append(
+                f"PH VAT identity net*0.12={net * PH_VAT_RATE:.2f} vs tax={tax:.2f}"
+            )
+        elif country != "PH" or tax_basis == "exclusive":
             checks.append(plausible)
-            result.tax_rate = round(rate, 4)
             result.reconciliation_notes.append(
                 f"derived rate {rate:.4f} -> {'plausible' if plausible else 'IMPLAUSIBLE'}"
             )
 
-    additive_is_circular = (
-        "sales_from_net_tax" in derivations
-        or {"net_from_sales", "tax_from_net"} <= derivations
-    )
     if net is not None and tax is not None and total_sales is not None:
-        if additive_is_circular:
-            result.reconciliation_notes.append(
-                "net+tax identity skipped: figures derived from one another"
-            )
+        if "sales_from_net_tax" in derivations or {"net_from_sales", "tax_from_net"} <= derivations:
+            result.reconciliation_notes.append("net+tax identity skipped: figures derived from one another")
         else:
             ok = abs(net + tax - total_sales) <= TOLERANCE
             checks.append(ok)
             result.reconciliation_notes.append(
-                f"net+tax={net + tax:.2f} vs total_sales={total_sales:.2f}"
-                f" -> {'ok' if ok else 'FAIL'}"
+                f"net+tax={net + tax:.2f} vs total_sales={total_sales:.2f} -> {'ok' if ok else 'FAIL'}"
             )
 
-    total_is_circular = bool({"sales_from_total", "total_from_sales"} & derivations)
+    total_is_circular = bool({"sales_from_total", "total_from_sales", "total_from_net_tax_exclusive"} & derivations)
     if total_sales is not None and total is not None:
         if total_is_circular:
-            result.reconciliation_notes.append(
-                "total identity skipped: total and sales derived from one another"
-            )
+            result.reconciliation_notes.append("total identity skipped: total and sales derived from one another")
         else:
             ok = abs(total_sales + service - total) <= TOLERANCE
             checks.append(ok)
             result.reconciliation_notes.append(
-                f"total_sales+service={total_sales + service:.2f} vs total={total:.2f}"
-                f" -> {'ok' if ok else 'FAIL'}"
+                f"total_sales+service={total_sales + service:.2f} vs total={total:.2f} -> {'ok' if ok else 'FAIL'}"
             )
 
-    # A receipt printing no tax should still add up: the net figure and the amount
-    # paid must agree. This is the only identity available on tax-free slips, and
-    # it catches digit misreads that would otherwise pass unchecked.
     if tax is None and net is not None and total is not None and not service:
         if "net_sales" in result.derived:
-            # net came from the total, so the comparison is circular. When both are
-            # printed the comparison is genuine evidence, even if they agree.
-            result.reconciliation_notes.append(
-                "no-tax identity skipped: net was derived from the total"
-            )
+            result.reconciliation_notes.append("no-tax identity skipped: net was derived from the total")
         else:
             ok = abs(net - total) <= TOLERANCE
             checks.append(ok)
             result.reconciliation_notes.append(
-                f"no-tax receipt: net={net:.2f} vs total={total:.2f}"
-                f" -> {'ok' if ok else 'FAIL'}"
+                f"no-tax receipt: net={net:.2f} vs total={total:.2f} -> {'ok' if ok else 'FAIL'}"
             )
 
-    if not checks:
-        result.reconciled = False
-        result.reconciliation_notes.append("no identity could be checked")
-    else:
-        result.reconciled = all(checks)
+    result.reconciled = bool(checks) and all(checks)
+    if result.reconciled and result.financial_reconciliation_status == "unresolved":
+        result.financial_reconciliation_status = "reconciled"
+    elif not result.reconciled and result.financial_reconciliation_status == "unresolved":
+        result.reconciliation_notes.append("no identity could be checked" if not checks else "identity failed")
 
 
 def resolve_tax_type(

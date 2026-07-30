@@ -226,3 +226,6 @@ tests/              # pytest suite
 ---
 
 **Last reviewed:** 2026-07-22
+
+### Financial semantics
+The worker keeps amount extraction deterministic and uses an optional dedicated Ollama semantics call only for tax basis and currency context. Caller `country`, `currency`, and `location` metadata is accepted on submission and has highest contextual priority. The callback may include optional `tax_basis`, `financial_reconciliation_status`, and `needs_manual_review`; detailed evidence and reported/computed reconciliation remain in MongoDB. Ollama failures are soft and never invent totals.

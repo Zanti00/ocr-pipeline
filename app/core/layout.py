@@ -125,6 +125,9 @@ class LayoutScan:
         candidates = self.amounts.get(field_name) or []
         return candidates[0] if candidates else None
 
+    def all(self, field_name: str) -> list[LabeledAmount]:
+        return list(self.amounts.get(field_name) or [])
+
 
 def scan_layout(lines: list[list[Word]]) -> LayoutScan:
     """Pair money labels with their figures using pixel geometry."""

@@ -34,6 +34,8 @@ FIELD_KINDS: dict[str, FieldKind] = {
     "tax_rate": FieldKind.RATE,
     "total_sales": FieldKind.MONEY,
     "service_charge": FieldKind.MONEY,
+    "discount_amount": FieldKind.MONEY,
+    "withholding_tax": FieldKind.MONEY,
     "total_amount": FieldKind.MONEY,
     "vat_classification": FieldKind.EXACT,
     "invoice_number": FieldKind.EXACT,
@@ -50,7 +52,8 @@ MONEY_FIELDS: tuple[str, ...] = tuple(
 # exempt from grounding and from recoverability measurement.
 DERIVED_FIELDS: frozenset[str] = frozenset({
     "country", "currency", "vendor_tax_id_type", "tax_type", "tax_rate",
-    "vat_classification", "expense_category",
+    "vat_classification", "expense_category", "tax_basis", "financial_reconciliation_status",
+    "needs_manual_review", "reported_total", "computed_total", "total_discrepancy",
 })
 
 # SERMS' canonical list, from ExpenseCategory::DEFAULT_NAMES. Anything outside it
@@ -66,6 +69,6 @@ DEFAULT_EXPENSE_CATEGORY = "Others"
 CALLBACK_FIELDS: tuple[str, ...] = (
     "vendor_name", "transaction_date", "total_amount", "vat_amount", "tin",
     "invoice_number", "vat_classification", "currency", "expense_category", "items",
-    "location",
+    "location", "tax_basis", "financial_reconciliation_status", "needs_manual_review",
 )
 

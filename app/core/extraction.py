@@ -1,9 +1,8 @@
 """Deterministic extraction orchestrator.
 
-Produces a complete field set from OCR output alone, with no language model
-involved. The LLM is layered on afterwards for vendor-name selection and expense
-category only, so this stage is independently testable and independently
-measurable.
+Produces a complete field set from OCR output, with deterministic amounts and
+an optional bounded financial-semantics answer layered before final reconciliation.
+The model is still limited to semantics, vendor selection and category assistance.
 """
 
 from __future__ import annotations
@@ -28,7 +27,8 @@ from app.core.extractors import (
 )
 from app.core.items import ItemScan, parse_items, reconcile_items
 from app.core.layout import LayoutScan, scan_layout
-from app.core.locale import LocaleGuess, detect_locale
+from app.core.financial_semantics import FinancialSemantics, infer_tax_basis
+from app.core.locale import LocaleGuess, resolve_locale
 from app.core.ocr_engine import OcrBundle
 from app.core.reconcile import (
     MoneyResult, classify_tax, resolve_money, resolve_tax_type,
@@ -53,6 +53,7 @@ class Extraction:
     item_scan: ItemScan | None = None
     evidence: dict[str, str] = field(default_factory=dict)
     lines: list[str] = field(default_factory=list)
+    financial_semantics: FinancialSemantics | None = None
 
     @property
     def reconciled(self) -> bool:
@@ -69,6 +70,11 @@ def extract(
     llm_location_choice: str | None = None,
     embedder: Embedder | None = None,
     category_tiebreaker: Tiebreaker | None = None,
+    caller_country: str | None = None,
+    caller_currency: str | None = None,
+    caller_location: str | None = None,
+    financial_semantics: FinancialSemantics | None = None,
+    llm_subtotal: float | None = None,
 ) -> Extraction:
     """Run extraction over a pooled OCR reading.
 
@@ -80,10 +86,29 @@ def extract(
     pooled_lines = _pooled_lines(bundle)
     combined = bundle.combined_text
 
-    locale = detect_locale(combined)
+    locale = resolve_locale(
+        combined,
+        caller_country=caller_country,
+        caller_currency=caller_currency,
+        caller_location=caller_location,
+        llm_currency=(financial_semantics.currency if financial_semantics else None),
+    )
+
+    inferred_basis, basis_evidence = infer_tax_basis(combined, locale.country)
+    is_fallback = basis_evidence in (["PH country fallback"], ["US country fallback"])
+    
+    if financial_semantics:
+        if is_fallback or inferred_basis == "unknown":
+            inferred_basis = financial_semantics.tax_basis
+            
+    tax_basis = inferred_basis
 
     vat_registered = classify_tax(combined, locale, None) == "vat"
-    layout, money = _best_layout(bundle, locale, vat_registered)
+    layout, money = _best_layout(bundle, locale, vat_registered, tax_basis)
+
+    if llm_subtotal is not None:
+        money.values["net_sales"] = llm_subtotal
+        money.evidence["net_sales"] = f"LLM verification override: {llm_subtotal}"
 
     tax_ids = find_tax_ids(pooled_lines)
     vendor_tax = select_vendor_tax_id(tax_ids)
@@ -107,10 +132,10 @@ def extract(
         tiebreaker=category_tiebreaker,
     )
 
-    location = None
-    if llm_location_choice and llm_location_choice in address_candidates:
+    location = caller_location or None
+    if location is None and llm_location_choice and llm_location_choice in address_candidates:
         location = llm_location_choice
-    elif address_candidates:
+    elif location is None and address_candidates:
         location = address_candidates[0]
 
     extraction = Extraction(
@@ -122,9 +147,10 @@ def extract(
         vendor_candidates=vendors,
         address_candidates=address_candidates,
         lines=pooled_lines,
+        financial_semantics=financial_semantics,
     )
 
-    item_scan = _best_items(bundle, money)
+    item_scan = _best_items(bundle, money, tax_basis)
     vat_classification = classify_tax(combined, locale, money.get("tax_amount"))
 
     extraction.fields = {
@@ -138,9 +164,17 @@ def extract(
         "tax_type": resolve_tax_type(
             locale.country, vat_classification, money.get("tax_amount")
         ),
+        "tax_basis": money.tax_basis,
         "tax_rate": money.tax_rate,
         "total_sales": money.get("total_sales"),
+        "financial_reconciliation_status": money.financial_reconciliation_status,
+        "needs_manual_review": money.needs_manual_review,
+        "reported_total": money.reported_total,
+        "computed_total": money.computed_total,
+        "total_discrepancy": money.discrepancy,
         "service_charge": money.get("service_charge"),
+        "discount_amount": money.get("discount_amount"),
+        "withholding_tax": money.get("withholding_tax"),
         "total_amount": money.get("total_amount"),
         "vat_classification": vat_classification,
         "invoice_number": invoice_number,
@@ -186,7 +220,7 @@ def extract(
     return extraction
 
 
-def _best_items(bundle: OcrBundle, money: MoneyResult) -> ItemScan:
+def _best_items(bundle: OcrBundle, money: MoneyResult, tax_basis: str = "unknown") -> ItemScan:
     """Parse items from whichever reading produces a set that adds up.
 
     Item parsing needs a reading that preserves visual rows, and that is generally
@@ -200,16 +234,22 @@ def _best_items(bundle: OcrBundle, money: MoneyResult) -> ItemScan:
     Tesseract work.
     """
     targets = {
-        "net_sales": money.get("net_sales"),
-        "total_sales": money.get("total_sales"),
+        "net_sales": money.get("net_sales") if tax_basis == "exclusive" else None,
+        "total_sales": money.get("total_sales") if tax_basis == "inclusive" else None,
     }
+    if tax_basis == "unknown":
+        # Only printed targets are safe when semantics are unresolved.
+        targets = {
+            "net_sales": money.get("net_sales") if "net_sales" not in money.derived else None,
+            "total_sales": money.get("total_sales") if "total_sales" not in money.derived else None,
+        }
 
     # Many POS slips print no subtotal at all - receipt 11 goes straight from the
     # item lines to TAX and TOTAL. Without a target the item sum cannot be checked
     # and every row is discarded, so the subtotal implied by the total is offered
     # as a fallback candidate.
     total = money.get("total_amount")
-    if total is not None:
+    if total is not None and tax_basis in ("exclusive", "inclusive"):
         implied = round(
             total - (money.get("tax_amount") or 0.0)
             - (money.get("service_charge") or 0.0), 2
@@ -231,7 +271,8 @@ def _best_items(bundle: OcrBundle, money: MoneyResult) -> ItemScan:
 
 
 def _best_layout(
-    bundle: OcrBundle, locale: LocaleGuess, vat_registered: bool = True
+    bundle: OcrBundle, locale: LocaleGuess, vat_registered: bool = True,
+    tax_basis: str = "unknown",
 ) -> tuple[LayoutScan, MoneyResult]:
     """Scan every pooled reading and keep the most productive money extraction.
 
@@ -244,7 +285,7 @@ def _best_layout(
 
     for reading in bundle.all_readings:
         scan = scan_layout(reading.lines)
-        money = resolve_money(scan, locale, vat_registered)
+        money = resolve_money(scan, locale, vat_registered, tax_basis)
         rank = (
             1 if money.reconciled else 0,
             scan.label_count,
@@ -255,7 +296,7 @@ def _best_layout(
 
     if best is None:  # pragma: no cover - bundle always has a primary
         empty = LayoutScan()
-        return empty, resolve_money(empty, locale, vat_registered)
+        return empty, resolve_money(empty, locale, vat_registered, tax_basis)
     return best[1], best[2]
 
 

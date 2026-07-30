@@ -78,6 +78,22 @@ OCR TEXT:
 """
 
 
+FINANCIAL_SEMANTICS_PROMPT = """Classify only the financial semantics visible in this receipt OCR text.
+
+Do not extract, copy, infer, or calculate any amount. Do not return totals, tax values,
+subtotals, rates, dates, vendors, or items. The tax_basis must be inclusive only when
+receipt wording says the tax is included, exclusive only when wording says tax is added,
+net/before tax, or exclusive; otherwise unknown. Currency must be an ISO-4217 code only
+when its code or an unambiguous symbol is visible in the OCR, otherwise unknown.
+Evidence must be short exact snippets copied from the OCR text. Confidence is 0..1.
+Return JSON only:
+{{"tax_basis":"inclusive|exclusive|unknown","confidence":0.0,"evidence":[],
+ "currency":"ISO-4217|unknown","currency_confidence":0.0,"currency_evidence":[]}}
+
+OCR TEXT:
+{ocr_text}
+"""
+
 ITEM_ANALYSIS_PROMPT = """Analyze the structural line items from the provided receipt text lines.
 
 Rules:
@@ -88,4 +104,16 @@ Rules:
 
 RECEIPT LINES:
 {lines}
+"""
+
+SUBTOTAL_VERIFICATION_PROMPT = """Find and extract the explicitly printed subtotal (net sales before tax) from the receipt text.
+
+Rules:
+- You must find the number printed on the receipt that represents the sum of the items before tax.
+- Do NOT calculate or guess. Look for labels like "Subtotal", "Sub-total", "Net Sales", or "Amount Net of VAT".
+- If no subtotal is printed, return null.
+- Respond with JSON only: {{"subtotal": 12.34}}
+
+OCR TEXT:
+{ocr_text}
 """

@@ -8,6 +8,7 @@ from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.prompts import (
     CATEGORY_TIEBREAK_PROMPT,
+    FINANCIAL_SEMANTICS_PROMPT,
     ITEM_ANALYSIS_PROMPT,
     LOCATION_SELECTION_PROMPT,
     RECEIPT_EXTRACTION_PROMPT,
@@ -145,3 +146,30 @@ class OllamaProvider(LLMProvider):
             return None
         items = result.get("items")
         return items if isinstance(items, list) else None
+
+    async def analyze_financial_semantics(self, ocr_text: str) -> dict | None:
+        """Return a bounded semantics answer; amounts are prohibited by prompt."""
+        if not ocr_text.strip():
+            return None
+        return await self._generate(
+            FINANCIAL_SEMANTICS_PROMPT.format(ocr_text=ocr_text[:12000]),
+            token_limit=SELECTION_TOKEN_LIMIT,
+            timeout=60.0,
+        )
+
+    async def verify_subtotal(self, ocr_text: str) -> float | None:
+        if not ocr_text.strip():
+            return None
+        from app.llm.prompts import SUBTOTAL_VERIFICATION_PROMPT
+        result = await self._generate(
+            SUBTOTAL_VERIFICATION_PROMPT.format(ocr_text=ocr_text[:12000]),
+            token_limit=SELECTION_TOKEN_LIMIT,
+            timeout=60.0,
+        )
+        if not result:
+            return None
+        choice = result.get("subtotal")
+        try:
+            return float(choice) if choice is not None else None
+        except (ValueError, TypeError):
+            return None

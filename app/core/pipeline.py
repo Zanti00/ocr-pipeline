@@ -4,15 +4,15 @@ Stage order is load-bearing:
 
     download -> page selection -> pooled OCR (variants x PSMs)
       -> locale detection            (must precede number parsing)
-      -> deterministic extraction    (money by geometry, TIN roles, dates)
-      -> optional model assist       (vendor selection, category tiebreak)
+      -> deterministic baseline extraction (money by geometry, TIN roles, dates)
+      -> optional financial-semantics assist (tax basis/currency only)
+      -> optional model selection assists (vendor/category)
       -> verification gate           (null anything ungrounded)
       -> confidence with hard caps   (calibrated to the consumer's 0.80 threshold)
       -> validated callback
 
-The language model no longer reads the receipt. It selects from closed candidate
-lists, and every optional assist fails soft: a model timeout degrades the result
-to the deterministic answer instead of failing the job.
+The language model performs only bounded semantics and closed-list selections;
+amounts remain deterministic and every optional assist fails soft.
 """
 
 from __future__ import annotations
@@ -30,7 +30,9 @@ from app.core.ocr_engine import OcrBundle, rank_candidates, read_pooled
 from app.core.pdf_handler import pdf_to_images
 from app.core.verification import Verification, verify
 from app.api.schemas.ocr import build_callback_payload
-from app.core.image_stitcher import stitch_segments
+from app.core.financial_semantics import (
+    FinancialSemantics, infer_tax_basis, semantics_requested, validate_financial_semantics,
+)
 from app.config import settings
 from app.db.models import ReceiptEmbedding
 from app.db.mongodb import MongoDBClient
@@ -67,6 +69,9 @@ async def process_receipt(
     source_service: str,
     force_process: bool = False,
     file_urls: list[str] | None = None,
+    country: str | None = None,
+    currency: str | None = None,
+    location: str | None = None,
 ) -> None:
     logger.info("Starting OCR pipeline for job %s (force_process=%s)", job_id, force_process)
 
@@ -91,7 +96,9 @@ async def process_receipt(
         if not images:
             raise ValueError("No images extracted from file")
 
-        bundle, extraction = await _read_and_extract(images)
+        bundle, extraction = await _read_and_extract(
+            images, caller_country=country, caller_currency=currency, caller_location=location
+        )
 
         verification = verify(
             extraction.as_dict(),
@@ -100,7 +107,11 @@ async def process_receipt(
             locale_resolved=bool(extraction.locale and extraction.locale.resolved),
             mean_word_confidence=bundle.confidence,
             tax_id_ambiguous=_tax_id_ambiguous(extraction),
-            derived_fields=set(extraction.money.derived) if extraction.money else set(),
+            derived_fields=(
+                set(extraction.money.derived) if extraction.money else set()
+            ) | {"tax_basis", "financial_reconciliation_status", "needs_manual_review",
+                 "reported_total", "computed_total", "total_discrepancy"}
+            | ({"location"} if location else set()),
         )
         breakdown = compute_confidence(
             verification,
@@ -124,13 +135,27 @@ async def process_receipt(
             ),
         )
 
+        callback_fields = dict(verification.fields)
+        has_callback_semantics = bool(
+            extraction.financial_semantics and extraction.financial_semantics.source == "qwen"
+        )
+        if not has_callback_semantics:
+            for key in ("tax_basis", "financial_reconciliation_status", "needs_manual_review"):
+                callback_fields.pop(key, None)
         payload = build_callback_payload(
             receipt_id=receipt_id,
-            fields=verification.fields,
+            fields=callback_fields,
             confidence=breakdown.score,
             status="completed",
             items=extraction.item_scan.payload() if extraction.item_scan else [],
-            is_duplicate=is_dup,
+            tax_basis=(extraction.fields.get("tax_basis") if has_callback_semantics else None),
+            financial_reconciliation_status=(
+                extraction.fields.get("financial_reconciliation_status")
+                if has_callback_semantics else None
+            ),
+            needs_manual_review=(
+                verification.needs_manual_review or extraction.fields.get("needs_manual_review", False)
+            ) if has_callback_semantics else None,
             duplicate_similarity=dup_score,
         )
         logger.info(
@@ -152,7 +177,13 @@ async def process_receipt(
         raise
 
 
-async def _read_and_extract(images: list[Image.Image]) -> tuple[OcrBundle, Extraction]:
+async def _read_and_extract(
+    images: list[Image.Image],
+    *,
+    caller_country: str | None = None,
+    caller_currency: str | None = None,
+    caller_location: str | None = None,
+) -> tuple[OcrBundle, Extraction]:
     """Read the strongest page and extract from it.
 
     Multi-page PDFs are scored per page and the best-reading page wins. The
@@ -163,7 +194,12 @@ async def _read_and_extract(images: list[Image.Image]) -> tuple[OcrBundle, Extra
 
     for index, image in enumerate(images):
         bundle = read_pooled(image, lang="eng")
-        extraction = await _extract_with_assists(bundle)
+        extraction = await _extract_with_assists(
+            bundle,
+            caller_country=caller_country,
+            caller_currency=caller_currency,
+            caller_location=caller_location,
+        )
         rank = (
             1 if extraction.reconciled else 0,
             1 if extraction.fields.get("total_amount") is not None else 0,
@@ -186,35 +222,119 @@ def _rank_of(pair: tuple[OcrBundle, Extraction]) -> tuple[int, int, float]:
     )
 
 
-async def _extract_with_assists(bundle: OcrBundle) -> Extraction:
+async def _extract_with_assists(
+    bundle: OcrBundle,
+    *,
+    caller_country: str | None = None,
+    caller_currency: str | None = None,
+    caller_location: str | None = None,
+) -> Extraction:
     """Deterministic extraction, then optional model and embedding assists.
 
     Runs the deterministic pass first so a shortlist exists to constrain the model
     with. Both assists are best-effort: any failure leaves the deterministic
     result in place.
     """
-    baseline = extract(bundle)
+    baseline = extract(
+        bundle,
+        caller_country=caller_country,
+        caller_currency=caller_currency,
+        caller_location=caller_location,
+    )
+
+    semantics = None
+    if semantics_requested(
+        bundle.combined_text, currency_ambiguous=baseline.fields.get("currency") is None
+    ):
+        semantics = await _ask_model_for_financial_semantics(bundle.combined_text)
+    arithmetic = _grounded_exclusive_basis(baseline, semantics)
+    if arithmetic is not None:
+        semantics = arithmetic
 
     vendor_choice = await _ask_model_for_vendor(baseline)
     location_choice = await _ask_model_for_location(baseline)
     embedder = _embedder()
 
-    if vendor_choice is None and location_choice is None and embedder is None:
+    # Subtotal verification
+    corrected_subtotal = None
+    money = baseline.money
+    item_scan = baseline.item_scan
+    
+    if money and money.get("net_sales") is not None:
+        net_sales = money.get("net_sales")
+        total = money.get("total_amount")
+        is_impossible = total is not None and net_sales > total + 0.05
+        reconciled_on_net = item_scan and item_scan.reconciled and item_scan.target == net_sales
+        
+        if is_impossible or (item_scan and item_scan.count > 0 and not reconciled_on_net):
+            corrected_subtotal = await _ask_model_for_subtotal(bundle.combined_text)
+
+    if vendor_choice is None and location_choice is None and embedder is None and semantics is None and corrected_subtotal is None:
         return baseline
 
     return extract(
         bundle,
         llm_vendor_choice=vendor_choice,
         llm_location_choice=location_choice,
+        financial_semantics=semantics,
+        caller_country=caller_country,
+        caller_currency=caller_currency,
+        caller_location=caller_location,
         embedder=embedder,
         category_tiebreaker=None,
+        llm_subtotal=corrected_subtotal,
     )
+
+
+def _grounded_exclusive_basis(
+    baseline: Extraction, current: FinancialSemantics | None = None
+) -> FinancialSemantics | None:
+    """Use independent printed arithmetic to outrank an LLM opinion."""
+    money = baseline.money
+    if money is None:
+        return None
+    explicit, evidence = infer_tax_basis(
+        "\n".join(baseline.lines), baseline.locale.country if baseline.locale else None
+    )
+    if evidence and evidence != ["PH country fallback"] and explicit == "inclusive":
+        return None
+    net, tax, total = money.get("net_sales"), money.get("tax_amount"), money.get("total_amount")
+    if net is None or tax is None or total is None:
+        return None
+    if any(name in money.derived for name in ("net_sales", "tax_amount", "total_amount")):
+        return None
+    if abs(net + tax + (money.get("service_charge") or 0.0) - total) > 0.02:
+        return None
+    snippets = tuple(value for key, value in money.evidence.items() if key in {"net_sales", "tax_amount", "total_amount"})
+    return FinancialSemantics(
+        tax_basis="exclusive", confidence=1.0, evidence=snippets,
+        currency=current.currency if current else "unknown",
+        currency_confidence=current.currency_confidence if current else 0.0,
+        currency_evidence=current.currency_evidence if current else (), source="arithmetic",
+    )
+async def _ask_model_for_financial_semantics(ocr_text: str) -> FinancialSemantics | None:
+    try:
+        provider = create_provider()
+        raw = await provider.analyze_financial_semantics(ocr_text)
+        return validate_financial_semantics(raw, ocr_text)
+    except Exception as exc:
+        logger.warning("Financial semantics unavailable, keeping deterministic result: %s", exc)
+        return None
+
+
+async def _ask_model_for_subtotal(ocr_text: str) -> float | None:
+    try:
+        provider = create_provider()
+        return await provider.verify_subtotal(ocr_text)
+    except Exception as exc:
+        logger.warning("Subtotal verification unavailable, keeping deterministic pick: %s", exc)
+        return None
 
 
 async def _ask_model_for_vendor(baseline: Extraction) -> str | None:
     shortlist = baseline.vendor_choice.shortlist if baseline.vendor_choice else []
     if len(shortlist) < 2:
-        return None  # nothing to disambiguate
+        return None
     try:
         provider = create_provider()
         return await provider.select_vendor_name(
@@ -378,6 +498,10 @@ def _job_document(
             "matches_count": matches_count,
         },
         "extracted_data": verification.fields,
+        "financial_semantics": (
+            extraction.financial_semantics.as_dict()
+            if extraction.financial_semantics else None
+        ),
         "ocr_selection": {
             "engine": bundle.primary.engine,
             "variant": bundle.primary.variant,
@@ -415,6 +539,13 @@ def _job_document(
         },
         "reconciliation": {
             "reconciled": extraction.reconciled,
+            "tax_basis": extraction.money.tax_basis if extraction.money else "unknown",
+            "financial_reconciliation_status": extraction.money.financial_reconciliation_status if extraction.money else "unresolved",
+            "reported_total": extraction.money.reported_total if extraction.money else None,
+            "computed_total": extraction.money.computed_total if extraction.money else None,
+            "discrepancy": extraction.money.discrepancy if extraction.money else None,
+            "needs_manual_review": extraction.money.needs_manual_review if extraction.money else False,
+            "tax_breakdown": extraction.money.tax_breakdown if extraction.money else [],
             "notes": extraction.money.reconciliation_notes if extraction.money else [],
             "derived_fields": sorted(extraction.money.derived) if extraction.money else [],
         },

@@ -2,7 +2,7 @@ from typing import Any, Optional, List
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.core.schema import EXPENSE_CATEGORIES
+from app.core.financial_semantics import normalize_iso_currency
 from app.core.verification import coerce_category
 
 # ISO 4217 codes the pipeline and SERMS both understand.
@@ -19,7 +19,31 @@ class OcrProcessRequest(BaseModel):
     file_urls: Optional[List[str]] = None
     callback_url: str
     source_service: Optional[str] = None
+    country: Optional[str] = None
+    currency: Optional[str] = None
+    location: Optional[str] = None
     force_process: bool = False
+
+    @field_validator("country", mode="before")
+    @classmethod
+    def normalize_country(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip().upper()
+        return text if len(text) == 2 and text.isalpha() else None
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def normalize_request_currency(cls, value: Any) -> Any:
+        return normalize_iso_currency(value)
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def normalize_location(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
 
 class OcrProcessResponse(BaseModel):
@@ -103,6 +127,9 @@ class OcrCallbackPayload(BaseModel):
     error: Optional[str] = None
     rejection_code: Optional[str] = None
     rejection_reason: Optional[str] = None
+    tax_basis: Optional[str] = None
+    financial_reconciliation_status: Optional[str] = None
+    needs_manual_review: Optional[bool] = None
 
     @field_validator("vat_classification")
     @classmethod
@@ -130,6 +157,26 @@ class OcrCallbackPayload(BaseModel):
         upper = value.strip().upper()
         return upper if upper in SUPPORTED_CURRENCIES else None
 
+    @field_validator("tax_basis")
+    @classmethod
+    def restrict_tax_basis(cls, value: Optional[str]) -> Optional[str]:
+        return value if value in ("inclusive", "exclusive", "unknown") else None
+
+    @field_validator("financial_reconciliation_status")
+    @classmethod
+    def restrict_reconciliation_status(cls, value: Optional[str]) -> Optional[str]:
+        allowed = {"unresolved", "reconciled", "computed", "reported", "reported_conflict", "computed_conflict"}
+        return value if value in allowed else None
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        data = super().model_dump(*args, **kwargs)
+        # New fields are optional and omitted when unset, preserving legacy
+        # callback payload shape while exposing them when the pipeline has a value.
+        for key in ("tax_basis", "financial_reconciliation_status", "needs_manual_review"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
     @field_validator("expense_category")
     @classmethod
     def restrict_category(cls, value: Optional[str]) -> Optional[str]:
@@ -155,6 +202,9 @@ def build_callback_payload(
     rejection_reason: str | None = None,
     is_duplicate: bool = False,
     duplicate_similarity: float | None = None,
+    tax_basis: str | None = None,
+    financial_reconciliation_status: str | None = None,
+    needs_manual_review: bool | None = None,
 ) -> OcrCallbackPayload:
     """Map the internal field set onto the SERMS contract.
 
@@ -184,6 +234,11 @@ def build_callback_payload(
         error=error,
         rejection_code=rejection_code,
         rejection_reason=rejection_reason or error,
+        tax_basis=fields_dict.get("tax_basis", tax_basis),
+        financial_reconciliation_status=fields_dict.get(
+            "financial_reconciliation_status", financial_reconciliation_status
+        ),
+        needs_manual_review=fields_dict.get("needs_manual_review", needs_manual_review),
     )
 
 

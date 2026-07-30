@@ -67,6 +67,9 @@ async def process_receipt(
                                 "callback_url": request.callback_url,
                                 "source_service": request.source_service,
                                 "force_process": request.force_process,
+                                "country": request.country,
+                                "currency": request.currency,
+                                "location": request.location,
                                 "status": "rejected",
                                 "error": reason,
                                 "rejection_code": code,
@@ -136,6 +139,9 @@ async def process_receipt(
         "callback_url": request.callback_url,
         "source_service": request.source_service,
         "force_process": request.force_process,
+        "country": request.country,
+        "currency": request.currency,
+        "location": request.location,
         "status": "queued",
     }
     await MongoDBClient.create_job(job_data)
@@ -148,6 +154,9 @@ async def process_receipt(
         callback_url=request.callback_url,
         source_service=request.source_service,
         force_process=request.force_process,
+        country=request.country,
+        currency=request.currency,
+        location=request.location,
     )
 
     return OcrProcessResponse(

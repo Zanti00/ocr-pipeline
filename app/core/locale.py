@@ -172,3 +172,66 @@ def _currency_from_symbol(lowered: str) -> str | None:
             return currency
     return None
 
+
+
+def explicit_currency(text: str) -> str | None:
+    """Find a printed ISO code/symbol, preferring the authoritative total lines."""
+    lines = text.splitlines()
+    preferred = [line for line in lines if re.search(
+        r"\b(?:total|grand total|amount due|balance due|net amount due|total sales)\b",
+        line, re.IGNORECASE,
+    )]
+    for candidate in (*preferred, text):
+        match = re.search(
+            r"\b(AED|ARS|AUD|BHD|BND|BRL|CAD|CHF|CNY|COP|CZK|DKK|EGP|EUR|GBP|HKD|IDR|ILS|INR|JPY|KRW|KWD|MYR|MXN|NOK|NZD|PHP|PLN|QAR|RUB|SAR|SEK|SGD|THB|TRY|TWD|USD|VND|ZAR)\b",
+            candidate, re.IGNORECASE,
+        )
+        if match:
+            return match.group(1).upper()
+        symbol = _currency_from_symbol(candidate.casefold())
+        if symbol:
+            return symbol
+    return None
+
+
+def resolve_locale(
+    text: str,
+    *,
+    caller_country: str | None = None,
+    caller_currency: str | None = None,
+    caller_location: str | None = None,
+    llm_currency: str | None = None,
+) -> LocaleGuess:
+    """Apply currency/context precedence without changing legacy detection."""
+    base = detect_locale(text)
+    country = (caller_country or "").strip().upper() or None
+    if country is None and caller_location:
+        location = caller_location.casefold()
+        for marker, inferred in (
+            ("philippines", "PH"), ("manila", "PH"), ("malaysia", "MY"),
+            ("singapore", "SG"), ("brunei", "BN"), ("japan", "JP"),
+            ("thailand", "TH"), ("hong kong", "HK"), ("australia", "AU"),
+            ("united states", "US"), ("usa", "US"),
+        ):
+            if marker in location:
+                country = inferred
+                break
+    country = country or base.country
+    receipt_currency = explicit_currency(text)
+    currency = caller_currency or receipt_currency
+    if currency is None and country:
+        currency = COUNTRY_CURRENCY.get(country)
+    currency = currency or base.currency or llm_currency
+    evidence = list(base.evidence)
+    score = base.score
+    if caller_country or caller_location:
+        score = max(score, MIN_CONFIDENT_SCORE)
+    if caller_country:
+        evidence.insert(0, "caller country")
+    if caller_location:
+        evidence.insert(0, "caller location")
+    if caller_currency:
+        evidence.insert(0, "caller currency")
+    if receipt_currency and not caller_currency:
+        evidence.insert(0, "receipt currency evidence")
+    return LocaleGuess(country=country, currency=currency, score=score, evidence=evidence)
