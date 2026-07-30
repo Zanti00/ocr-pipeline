@@ -131,7 +131,7 @@ class OcrCallbackPayload(BaseModel):
     financial_reconciliation_status: Optional[str] = None
     needs_manual_review: Optional[bool] = None
 
-    @field_validator("vat_classification")
+    @field_validator("vat_classification", mode="before")
     @classmethod
     def restrict_vat_classification(cls, value: Optional[str]) -> Optional[str]:
         """SERMS validates this with ``in:vat,non-vat``.
@@ -142,7 +142,7 @@ class OcrCallbackPayload(BaseModel):
         """
         return value if value in ("vat", "non-vat") else None
 
-    @field_validator("currency")
+    @field_validator("currency", mode="before")
     @classmethod
     def restrict_currency(cls, value: Optional[str]) -> Optional[str]:
         """Coerce unrecognised currency codes to None.
@@ -157,12 +157,12 @@ class OcrCallbackPayload(BaseModel):
         upper = value.strip().upper()
         return upper if upper in SUPPORTED_CURRENCIES else None
 
-    @field_validator("tax_basis")
+    @field_validator("tax_basis", mode="before")
     @classmethod
     def restrict_tax_basis(cls, value: Optional[str]) -> Optional[str]:
         return value if value in ("inclusive", "exclusive", "unknown") else None
 
-    @field_validator("financial_reconciliation_status")
+    @field_validator("financial_reconciliation_status", mode="before")
     @classmethod
     def restrict_reconciliation_status(cls, value: Optional[str]) -> Optional[str]:
         allowed = {"unresolved", "reconciled", "computed", "reported", "reported_conflict", "computed_conflict"}
@@ -177,7 +177,7 @@ class OcrCallbackPayload(BaseModel):
                 data.pop(key, None)
         return data
 
-    @field_validator("expense_category")
+    @field_validator("expense_category", mode="before")
     @classmethod
     def restrict_category(cls, value: Optional[str]) -> Optional[str]:
         return coerce_category(value) if value else None
