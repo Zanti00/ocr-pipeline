@@ -18,6 +18,12 @@ OCR Pipeline is a standalone Python/FastAPI microservice providing AI-powered re
 
 **Full documentation index:** [`docs/index.md`](index.md)
 
+### SERMS Documentation Connection
+If the prompt or the AI model/agent requires context, constraints, or schemas from the main SERMS (Smart Expense Management System) repository, reference the external SERMS documentation located at:
+- **SERMS AGENTS.md:** `c:\Projects\smart-expense-management-system\AGENTS.md`
+- **SERMS Docs Directory:** `c:\Projects\smart-expense-management-system\docs\` 
+Agents must actively read these files when making integration decisions (e.g., payloads, API headers, webhook rules) to ensure compliance with SERMS core rules.
+
 ---
 
 ## Pinned stack
