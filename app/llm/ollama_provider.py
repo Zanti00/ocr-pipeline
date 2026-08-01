@@ -19,7 +19,7 @@ from app.llm.prompts import (
     LOCATION_SELECTION_PROMPT,
     RECEIPT_EXTRACTION_PROMPT,
     VENDOR_SELECTION_PROMPT,
-    TEXT_NORMALIZATION_PROMPT,
+    BATCH_TEXT_NORMALIZATION_PROMPT,
 )
 
 
@@ -181,14 +181,23 @@ class OllamaProvider(LLMProvider):
         except (ValueError, TypeError):
             return None
 
-    async def normalize_text(self, text: str, context: str) -> str:
-        if not text.strip():
-            return text
-        prompt = TEXT_NORMALIZATION_PROMPT.format(
-            text=text, context=context[:2000]
+    async def normalize_batch_texts(self, texts: list[str], context: str) -> list[str]:
+        if not texts:
+            return []
+        prompt = BATCH_TEXT_NORMALIZATION_PROMPT.format(
+            texts=json.dumps(texts), context=context[:2000]
         )
-        result = await self._generate(prompt, token_limit=SELECTION_TOKEN_LIMIT, timeout=60.0)
-        if not result:
-            return text
-        corrected = result.get("corrected_text")
-        return str(corrected).strip() if corrected else text
+        result = await self._generate(prompt, token_limit=EXTRACTION_TOKEN_LIMIT, timeout=90.0)
+        
+        # Fallback to original if parsing fails or result is invalid
+        if not result or "corrected_texts" not in result:
+            return texts
+            
+        corrected = result.get("corrected_texts", [])
+        
+        # Validation: output count must equal input count
+        if not isinstance(corrected, list) or len(corrected) != len(texts):
+            logger.warning("Batch normalization returned %d items, expected %d. Falling back.", len(corrected) if isinstance(corrected, list) else 0, len(texts))
+            return texts
+            
+        return [str(c).strip() if c else t for c, t in zip(corrected, texts)]

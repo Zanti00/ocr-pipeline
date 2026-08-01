@@ -117,23 +117,24 @@ OCR TEXT:
 {ocr_text}
 """
 
-TEXT_NORMALIZATION_PROMPT = """You are an intelligent receipt OCR text corrector.
-Your goal is to correct spelling mistakes in the given text snippet based on the surrounding receipt context.
+BATCH_TEXT_NORMALIZATION_PROMPT = """You are an intelligent receipt OCR text corrector.
+Your goal is to correct spelling mistakes in the given list of line item texts based on the surrounding receipt context.
 
 Rules:
 1. Fix obvious spelling errors (e.g., 'Res Coffee' -> 'Red Coffee', 'W@lmart' -> 'Walmart').
 2. DO NOT change the meaning of the word or fabricate new information.
 3. Preserve valid brand names, product codes, abbreviations, and units (e.g., 'OZ', 'LB').
 4. If the text appears perfectly valid or you are unsure, return the exact original text.
+5. You MUST return exactly the same number of items as the input array, in the exact same order.
 
 Full Receipt Text for Context:
 ---
 {context}
 ---
 
-Text to Correct:
-{text}
+Texts to Correct (JSON Array):
+{texts}
 
-Respond with a single JSON object:
-{{"corrected_text": "the corrected text or original if no change is needed"}}
+Respond with a single JSON object containing an array of corrected texts:
+{{"corrected_texts": ["corrected text 1", "corrected text 2", ...]}}
 """

@@ -55,10 +55,8 @@ async def test_llm_corrector_mocked(monkeypatch):
     class MockProvider(LLMProvider):
         async def extract_receipt_fields(self, ocr_text: str) -> dict:
             return {}
-        async def normalize_text(self, text: str, context: str) -> str:
-            if "Res Coffee" in text:
-                return "Red Coffee"
-            return text
+        async def normalize_batch_texts(self, texts: list[str], context: str) -> list[str]:
+            return ["Red Coffee" if "Res Coffee" in text else text for text in texts]
             
     import app.core.postprocessing
     monkeypatch.setattr(app.core.postprocessing, "create_provider", lambda: MockProvider())
@@ -78,10 +76,8 @@ async def test_normalize_extraction_item_mutation(mock_bundle, monkeypatch):
     class MockProvider(LLMProvider):
         async def extract_receipt_fields(self, ocr_text: str) -> dict:
             return {}
-        async def normalize_text(self, text: str, context: str) -> str:
-            if "Res Coffee" in text:
-                return "Red Coffee"
-            return text
+        async def normalize_batch_texts(self, texts: list[str], context: str) -> list[str]:
+            return ["Red Coffee" if "Res Coffee" in text else text for text in texts]
             
     import app.core.postprocessing
     monkeypatch.setattr(app.core.postprocessing, "create_provider", lambda: MockProvider())

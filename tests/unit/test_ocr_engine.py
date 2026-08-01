@@ -51,7 +51,8 @@ def test_select_primary_rejects_empty_candidates():
         select_primary([reading("   ", 10.0, 1.0)])
 
 
-def test_read_pooled_can_select_tesseract_and_preserve_all_candidates(monkeypatch):
+@pytest.mark.asyncio
+async def test_read_pooled_can_select_tesseract_and_preserve_all_candidates(monkeypatch):
     paddle = reading(
         "Paddle total 10.00", 4.0, 0.99,
         engine="paddle", variant="source", psm=0,
@@ -60,13 +61,13 @@ def test_read_pooled_can_select_tesseract_and_preserve_all_candidates(monkeypatc
     alternate = reading("Other total 10.00", 5.5, 0.90, variant="flat", psm=4)
 
     monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: paddle)
-    monkeypatch.setattr(
-        ocr_engine,
-        "read_best",
-        lambda image, lang, psms: (tesseract, [tesseract, alternate]),
-    )
+    
+    async def mock_read_best(*args, **kwargs):
+        return (tesseract, [tesseract, alternate])
+        
+    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
 
-    bundle = ocr_engine.read_pooled(object(), pool_size=3)
+    bundle = await ocr_engine.read_pooled(object(), pool_size=3)
 
     assert bundle.primary is tesseract
     assert bundle.primary.engine == "tesseract"
@@ -75,27 +76,29 @@ def test_read_pooled_can_select_tesseract_and_preserve_all_candidates(monkeypatc
     assert len(bundle.supporting) == 2
 
 
-def test_read_pooled_falls_back_to_tesseract_when_paddle_fails(monkeypatch):
+@pytest.mark.asyncio
+async def test_read_pooled_falls_back_to_tesseract_when_paddle_fails(monkeypatch):
     tesseract = reading("Tesseract total 10.00", 6.0, 0.88)
 
     def fail_paddle(image):
         raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(ocr_engine, "read_paddle", fail_paddle)
-    monkeypatch.setattr(
-        ocr_engine,
-        "read_best",
-        lambda image, lang, psms: (tesseract, [tesseract]),
-    )
+    
+    async def mock_read_best(*args, **kwargs):
+        return (tesseract, [tesseract])
+        
+    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
 
-    bundle = ocr_engine.read_pooled(object(), pool_size=2)
+    bundle = await ocr_engine.read_pooled(object(), pool_size=2)
 
     assert bundle.primary is tesseract
     assert bundle.primary.engine == "tesseract"
     assert bundle.supporting == []
 
 
-def test_read_pooled_does_not_duplicate_identical_text(monkeypatch):
+@pytest.mark.asyncio
+async def test_read_pooled_does_not_duplicate_identical_text(monkeypatch):
     paddle = reading(
         "Same total 10.00", 5.0, 0.95,
         engine="paddle", variant="source", psm=0,
@@ -104,13 +107,13 @@ def test_read_pooled_does_not_duplicate_identical_text(monkeypatch):
     alternate = reading("Different total 10.00", 4.0, 0.80, variant="flat")
 
     monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: paddle)
-    monkeypatch.setattr(
-        ocr_engine,
-        "read_best",
-        lambda image, lang, psms: (tesseract, [tesseract, alternate]),
-    )
+    
+    async def mock_read_best(*args, **kwargs):
+        return (tesseract, [tesseract, alternate])
+        
+    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
 
-    bundle = ocr_engine.read_pooled(object(), pool_size=3)
+    bundle = await ocr_engine.read_pooled(object(), pool_size=3)
 
     assert bundle.combined_text.count("Same total 10.00") == 1
     assert alternate in bundle.supporting

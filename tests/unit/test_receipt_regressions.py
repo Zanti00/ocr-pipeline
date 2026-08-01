@@ -6,21 +6,24 @@ from app.core.extraction import extract
 
 RECEIPTS = Path(__file__).parents[2] / "docs" / "receipts"
 
+import pytest_asyncio
+
 @pytest.fixture(scope="session")
 def bundles():
     """Cache bundles to avoid re-running OCR during regression tests."""
     cache = {}
-    def _get(name):
+    async def _get(name):
         if name not in cache:
             path = RECEIPTS / name
             if not path.exists():
                 pytest.skip(f"fixture unavailable: {name}")
-            cache[name] = read_pooled(Image.open(path), lang="eng")
+            cache[name] = await read_pooled(Image.open(path), lang="eng")
         return cache[name]
     return _get
 
-def test_receipt_21_exclusive_tax_computed_total(bundles):
-    bundle = bundles("receipt 21.jpg")
+@pytest.mark.asyncio
+async def test_receipt_21_exclusive_tax_computed_total(bundles):
+    bundle = await bundles("receipt 21.jpg")
     extraction = extract(bundle, caller_country="US")
     
     assert extraction.fields["tax_basis"] == "exclusive"
@@ -48,8 +51,9 @@ def test_receipt_21_exclusive_tax_computed_total(bundles):
     "receipt 20.png",
     "receipt 22.jpg",
 ])
-def test_other_receipts_smoke(bundles, name):
-    bundle = bundles(name)
+@pytest.mark.asyncio
+async def test_other_receipts_smoke(bundles, name):
+    bundle = await bundles(name)
     extraction = extract(bundle)
     assert extraction.fields is not None
     assert "total_amount" in extraction.fields

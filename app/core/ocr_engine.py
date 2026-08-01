@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import logging
 import re
+import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Literal, Sequence
 
@@ -33,6 +36,11 @@ except Exception as exc:  # pragma: no cover - depends on the runtime image
 
 paddle_ocr = None
 _paddle_init_attempted = False
+
+# Global Thread Pool Executor for CPU-bound OCR and preprocessing tasks.
+# Capped to avoid resource starvation under concurrent celery jobs.
+MAX_OCR_WORKERS = max(1, min(os.cpu_count() or 4, 6))
+ocr_executor = ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS, thread_name_prefix="ocr")
 
 
 def _get_paddle_ocr():
@@ -213,28 +221,44 @@ class OcrBundle:
         return sum(1 for r in self.all_readings if needle in r.text)
 
 
-def read_best(
+async def read_best(
     image: Image.Image,
     lang: str = "eng",
     psms: Sequence[int] = DEFAULT_PSMS,
     variants: Sequence[Variant] | None = None,
 ) -> tuple[OcrReading, list[OcrReading]]:
-    """Try every Tesseract variant x PSM combination.
+    """Try every Tesseract variant x PSM combination concurrently.
 
-    Returns ``(best, all_candidates)``. Roughly 15 CPU passes per receipt, which
-    fits comfortably inside the async Celery budget - nothing is waiting on a
-    synchronous response.
+    Runs variants in the global ocr_executor to parallelize CPU passes.
     """
     candidates: list[OcrReading] = []
-    for variant in variants or build_variants(image):
+    loop = asyncio.get_running_loop()
+
+    def _build():
+        return variants or build_variants(image)
+        
+    actual_variants = await loop.run_in_executor(ocr_executor, _build)
+
+    def _run_variant(v_img, v_label, psm_val):
+        reading = read_variant(v_img, psm=psm_val, lang=lang)
+        reading.variant = v_label
+        return reading
+
+    tasks = []
+    for variant in actual_variants:
         for psm in psms:
-            try:
-                reading = read_variant(variant.image, psm=psm, lang=lang)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("OCR failed for %s/psm%s: %s", variant.label, psm, exc)
-                continue
-            reading.variant = variant.label
-            candidates.append(reading)
+            tasks.append(
+                loop.run_in_executor(ocr_executor, _run_variant, variant.image, variant.label, psm)
+            )
+
+    # Failure strategy: if one variant fails, we ignore it and continue.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for i, res in enumerate(results):
+        if isinstance(res, Exception):
+            logger.warning("OCR failed for a variant: %s", res)
+        else:
+            candidates.append(res)
 
     if not candidates:
         raise RuntimeError("All OCR variants failed")
@@ -434,38 +458,43 @@ def _supporting_readings(
     return supporting
 
 
-def read_pooled(
+async def read_pooled(
     image: Image.Image,
     lang: str = "eng",
     psms: Sequence[int] = DEFAULT_PSMS,
     pool_size: int = 4,
 ) -> OcrBundle:
-    """Run PaddleOCR and Tesseract, then select the best existing candidate.
+    """Run PaddleOCR and Tesseract concurrently, then select the best candidate.
 
-    The candidate pool does not add OCR work: Paddle runs once and Tesseract
-    still runs the existing variant x PSM search. All successful readings remain
-    available for downstream amount and item reconciliation.
+    Paddle and Tesseract are dispatched to the global executor.
     """
     candidates: list[OcrReading] = []
+    loop = asyncio.get_running_loop()
 
-    try:
-        paddle_candidate = read_paddle(image)
-        candidates.append(paddle_candidate)
+    # We can run Paddle and Tesseract best concurrently
+    paddle_task = loop.run_in_executor(ocr_executor, read_paddle, image)
+    tesseract_task = asyncio.create_task(read_best(image, lang=lang, psms=psms))
+
+    # Wait for both. If one fails, the other might succeed.
+    results = await asyncio.gather(paddle_task, tesseract_task, return_exceptions=True)
+    
+    paddle_res, tesseract_res = results[0], results[1]
+
+    if isinstance(paddle_res, Exception):
+        logger.warning("PaddleOCR failed; continuing with Tesseract: %s", paddle_res)
+    else:
+        candidates.append(paddle_res)
         logger.info(
             "PaddleOCR succeeded (score=%.3f, conf=%.3f)",
-            paddle_candidate.score,
-            paddle_candidate.confidence,
+            paddle_res.score,
+            paddle_res.confidence,
         )
-    except Exception as exc:
-        logger.warning("PaddleOCR failed; continuing with Tesseract: %s", exc)
 
-    try:
-        _, tesseract_candidates = read_best(image, lang=lang, psms=psms)
-        candidates.extend(
-            candidate for candidate in tesseract_candidates if candidate.text.strip()
-        )
-    except Exception as exc:
-        logger.warning("Tesseract OCR failed; continuing with PaddleOCR: %s", exc)
+    if isinstance(tesseract_res, Exception):
+        logger.warning("Tesseract OCR failed; continuing with PaddleOCR: %s", tesseract_res)
+    else:
+        best_tess, tess_cands = tesseract_res
+        candidates.extend(c for c in tess_cands if c.text.strip())
 
     if not candidates:
         raise RuntimeError("PaddleOCR and Tesseract produced no OCR candidates")

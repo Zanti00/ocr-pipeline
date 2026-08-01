@@ -20,10 +20,13 @@ from __future__ import annotations
 import logging
 from io import BytesIO
 
+import asyncio
+import functools
 import httpx
 from PIL import Image
 
 from app.core.callback import send_callback
+import time
 from app.core.confidence import ConfidenceBreakdown, compute_confidence
 from app.core.extraction import Extraction, extract
 from app.core.ocr_engine import OcrBundle, rank_candidates, read_pooled
@@ -98,9 +101,11 @@ async def process_receipt(
         if not images:
             raise ValueError("No images extracted from file")
 
-        bundle, extraction = await _read_and_extract(
+        t0_ocr = time.perf_counter()
+        bundle, extraction, metrics = await _read_and_extract(
             images, caller_country=country, caller_currency=currency, caller_location=location
         )
+        t_ocr_total = time.perf_counter() - t0_ocr
 
         verification = verify(
             extraction.as_dict(),
@@ -123,8 +128,13 @@ async def process_receipt(
             locale_certainty=extraction.locale.certainty if extraction.locale else 0.0,
         )
 
+        t0_embed = time.perf_counter()
         await _store_embedding(receipt_id, source_service, bundle.combined_text)
+        t_embed = time.perf_counter() - t0_embed
+
+        t0_dup = time.perf_counter()
         is_dup, dup_score, matches = await _evaluate_duplicate(receipt_id, source_service, bundle.combined_text)
+        t_dup = time.perf_counter() - t0_dup
 
         await MongoDBClient.update_job_status(
             job_id, "completed",
@@ -161,9 +171,11 @@ async def process_receipt(
             duplicate_similarity=dup_score,
         )
         logger.info(
-            "Job %s complete: engine=%s variant=%s psm=%s score=%.3f reasons=%s",
+            "Job %s complete: engine=%s variant=%s psm=%s score=%.3f reasons=%s. "
+            "Timing [Total OCR: %.3fs (Engine: %.3fs, LLM: %.3fs), Embed: %.3fs, Dup: %.3fs]",
             job_id, bundle.primary.engine, bundle.primary.variant, bundle.primary.psm,
             breakdown.score, verification.reasons or "none",
+            t_ocr_total, metrics.get("engine", 0.0), metrics.get("llm", 0.0), t_embed, t_dup
         )
 
         if not await send_callback(callback_url, payload.model_dump()):
@@ -185,7 +197,7 @@ async def _read_and_extract(
     caller_country: str | None = None,
     caller_currency: str | None = None,
     caller_location: str | None = None,
-) -> tuple[OcrBundle, Extraction]:
+) -> tuple[OcrBundle, Extraction, dict]:
     """Read the strongest page and extract from it.
 
     Multi-page PDFs are scored per page and the best-reading page wins. The
@@ -193,15 +205,41 @@ async def _read_and_extract(
     which loses the receipt whenever page one is a cover sheet.
     """
     best: tuple[OcrBundle, Extraction] | None = None
+    metrics = {"engine": 0.0, "llm": 0.0}
 
-    for index, image in enumerate(images):
-        bundle = read_pooled(image, lang="eng")
-        extraction = await _extract_with_assists(
-            bundle,
-            caller_country=caller_country,
-            caller_currency=caller_currency,
-            caller_location=caller_location,
-        )
+    # Bounded concurrency: allow processing up to MAX_PDF_PAGES concurrently
+    semaphore = asyncio.Semaphore(MAX_PDF_PAGES)
+
+    async def _process_page(index: int, image: Image.Image) -> tuple[OcrBundle, Extraction, float, float]:
+        async with semaphore:
+            t0_engine = time.perf_counter()
+            bundle = await read_pooled(image, lang="eng")
+            t_engine = time.perf_counter() - t0_engine
+
+            t0_llm = time.perf_counter()
+            extraction = await _extract_with_assists(
+                bundle,
+                caller_country=caller_country,
+                caller_currency=caller_currency,
+                caller_location=caller_location,
+            )
+            t_llm = time.perf_counter() - t0_llm
+            return bundle, extraction, t_engine, t_llm
+
+    tasks = [_process_page(i, img) for i, img in enumerate(images)]
+    
+    # Use return_exceptions=True so one failed page doesn't crash the whole receipt
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for index, res in enumerate(results):
+        if isinstance(res, Exception):
+            logger.warning("Page %s extraction failed: %s", index, res)
+            continue
+            
+        bundle, extraction, engine_time, llm_time = res
+        metrics["engine"] += engine_time
+        metrics["llm"] += llm_time
+        
         rank = (
             1 if extraction.reconciled else 0,
             1 if extraction.fields.get("total_amount") is not None else 0,
@@ -211,8 +249,9 @@ async def _read_and_extract(
             best = (bundle, extraction)
         logger.debug("Page %s scored %s", index, rank)
 
-    assert best is not None  # images is non-empty by the time we get here
-    return best
+    if best is None:
+        raise RuntimeError("All pages failed to extract")
+    return best[0], best[1], metrics
 
 
 def _rank_of(pair: tuple[OcrBundle, Extraction]) -> tuple[int, int, float]:
@@ -244,48 +283,66 @@ async def _extract_with_assists(
         caller_location=caller_location,
     )
 
-    semantics = None
-    if semantics_requested(
-        bundle.combined_text, currency_ambiguous=baseline.fields.get("currency") is None
-    ):
-        semantics = await _ask_model_for_financial_semantics(bundle.combined_text)
-    arithmetic = _grounded_exclusive_basis(baseline, semantics)
-    if arithmetic is not None:
-        semantics = arithmetic
+    async def fetch_semantics():
+        if semantics_requested(
+            bundle.combined_text, currency_ambiguous=baseline.fields.get("currency") is None
+        ):
+            sem = await _ask_model_for_financial_semantics(bundle.combined_text)
+            arithmetic = _grounded_exclusive_basis(baseline, sem)
+            return arithmetic if arithmetic is not None else sem
+        return None
 
-    vendor_choice = await _ask_model_for_vendor(baseline)
-    location_choice = await _ask_model_for_location(baseline)
+    async def fetch_vendor():
+        return await _ask_model_for_vendor(baseline)
+
+    async def fetch_location():
+        return await _ask_model_for_location(baseline)
+
+    async def fetch_subtotal():
+        money = baseline.money
+        item_scan = baseline.item_scan
+        if money and money.get("net_sales") is not None:
+            net_sales = money.get("net_sales")
+            total = money.get("total_amount")
+            is_impossible = total is not None and net_sales > total + 0.05
+            reconciled_on_net = item_scan and item_scan.reconciled and item_scan.target == net_sales
+            if is_impossible or (item_scan and item_scan.count > 0 and not reconciled_on_net):
+                return await _ask_model_for_subtotal(bundle.combined_text)
+        return None
+
+    results = await asyncio.gather(
+        fetch_semantics(),
+        fetch_vendor(),
+        fetch_location(),
+        fetch_subtotal(),
+        return_exceptions=True
+    )
+
+    semantics = results[0] if not isinstance(results[0], Exception) else None
+    vendor_choice = results[1] if not isinstance(results[1], Exception) else None
+    location_choice = results[2] if not isinstance(results[2], Exception) else None
+    corrected_subtotal = results[3] if not isinstance(results[3], Exception) else None
+
     embedder = _embedder()
-
-    # Subtotal verification
-    corrected_subtotal = None
-    money = baseline.money
-    item_scan = baseline.item_scan
-    
-    if money and money.get("net_sales") is not None:
-        net_sales = money.get("net_sales")
-        total = money.get("total_amount")
-        is_impossible = total is not None and net_sales > total + 0.05
-        reconciled_on_net = item_scan and item_scan.reconciled and item_scan.target == net_sales
-        
-        if is_impossible or (item_scan and item_scan.count > 0 and not reconciled_on_net):
-            corrected_subtotal = await _ask_model_for_subtotal(bundle.combined_text)
 
     if vendor_choice is None and location_choice is None and embedder is None and semantics is None and corrected_subtotal is None:
         await normalize_extraction(baseline, bundle)
         return baseline
 
-    final_extraction = extract(
-        bundle,
-        llm_vendor_choice=vendor_choice,
-        llm_location_choice=location_choice,
-        financial_semantics=semantics,
-        caller_country=caller_country,
-        caller_currency=caller_currency,
-        caller_location=caller_location,
-        embedder=embedder,
-        category_tiebreaker=None,
-        llm_subtotal=corrected_subtotal,
+    final_extraction = await asyncio.to_thread(
+        functools.partial(
+            extract,
+            bundle,
+            llm_vendor_choice=vendor_choice,
+            llm_location_choice=location_choice,
+            financial_semantics=semantics,
+            caller_country=caller_country,
+            caller_currency=caller_currency,
+            caller_location=caller_location,
+            embedder=embedder,
+            category_tiebreaker=None,
+            llm_subtotal=corrected_subtotal,
+        )
     )
     
     await normalize_extraction(final_extraction, bundle)
@@ -406,7 +463,7 @@ async def _store_embedding(receipt_id: int, source_service: str, text: str) -> N
     if not text.strip():
         return
     try:
-        embedding = EmbeddingGenerator.generate(text)
+        embedding = await asyncio.to_thread(EmbeddingGenerator.generate, text)
         async with AsyncSessionLocal() as session:
             session.add(
                 ReceiptEmbedding(
@@ -431,7 +488,7 @@ async def _evaluate_duplicate(
     if not text.strip():
         return False, None, []
     try:
-        embedding = EmbeddingGenerator.generate(text)
+        embedding = await asyncio.to_thread(EmbeddingGenerator.generate, text)
         async with AsyncSessionLocal() as session:
             matches = await find_similar_receipts(
                 session=session,

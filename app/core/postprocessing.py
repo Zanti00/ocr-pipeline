@@ -139,29 +139,33 @@ class LLMContextCorrector:
 
         provider = create_provider()
         
-        # We only process if the provider has normalize_text implemented
-        if not hasattr(provider, "normalize_text"):
+        # We only process if the provider has normalize_batch_texts implemented
+        if not hasattr(provider, "normalize_batch_texts"):
             return items
 
-        corrected_items = []
-        for item in items:
-            name = item.get("name", "")
-            if not name:
-                corrected_items.append(item)
-                continue
+        # Extract non-empty names
+        names = [item.get("name", "") for item in items]
+        valid_indices = [i for i, name in enumerate(names) if name]
+        texts_to_correct = [names[i] for i in valid_indices]
 
-            try:
-                # LLM call for complex name normalization
-                corrected_name = await provider.normalize_text(name, raw_text)
-                if corrected_name and corrected_name.lower() != name.lower():
-                    logger.debug("LLM corrected item name %r -> %r", name, corrected_name)
-                    item["name"] = corrected_name
-            except Exception as exc:
-                logger.warning("LLM correction failed for item %r: %s", name, exc)
+        if not texts_to_correct:
+            return items
+
+        try:
+            # Batch LLM call for complex name normalization
+            corrected_texts = await provider.normalize_batch_texts(texts_to_correct, raw_text)
             
-            corrected_items.append(item)
+            # Since validation ensures length match, we can safely zip
+            if len(corrected_texts) == len(texts_to_correct):
+                for idx, c_name in zip(valid_indices, corrected_texts):
+                    orig_name = names[idx]
+                    if c_name and c_name.lower() != orig_name.lower():
+                        logger.debug("LLM batch corrected item name %r -> %r", orig_name, c_name)
+                        items[idx]["name"] = c_name
+        except Exception as exc:
+            logger.warning("LLM batch correction failed: %s", exc)
             
-        return corrected_items
+        return items
 
 
 async def normalize_extraction(extraction: Extraction, bundle: OcrBundle) -> None:
