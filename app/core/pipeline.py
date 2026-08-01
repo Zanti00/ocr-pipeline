@@ -28,6 +28,7 @@ from app.core.confidence import ConfidenceBreakdown, compute_confidence
 from app.core.extraction import Extraction, extract
 from app.core.ocr_engine import OcrBundle, rank_candidates, read_pooled
 from app.core.pdf_handler import pdf_to_images
+from app.core.image_stitcher import stitch_segments
 from app.core.verification import Verification, verify
 from app.api.schemas.ocr import build_callback_payload
 from app.core.financial_semantics import (
