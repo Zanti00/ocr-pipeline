@@ -19,28 +19,30 @@ OCR Pipeline is a standalone Python/FastAPI microservice providing AI-powered re
 **Full documentation index:** [`docs/index.md`](index.md)
 
 ### SERMS Documentation Connection
+
 If the prompt or the AI model/agent requires context, constraints, or schemas from the main SERMS (Smart Expense Management System) repository, reference the external SERMS documentation located at:
+
 - **SERMS AGENTS.md:** `c:\Projects\smart-expense-management-system\AGENTS.md`
-- **SERMS Docs Directory:** `c:\Projects\smart-expense-management-system\docs\` 
-Agents must actively read these files when making integration decisions (e.g., payloads, API headers, webhook rules) to ensure compliance with SERMS core rules.
+- **SERMS Docs Directory:** `c:\Projects\smart-expense-management-system\docs\`
+  Agents must actively read these files when making integration decisions (e.g., payloads, API headers, webhook rules) to ensure compliance with SERMS core rules.
 
 ---
 
 ## Pinned stack
 
-| Layer | Technology | Role |
-|-------|-----------|------|
-| **API Framework** | FastAPI (Python 3.12+) | HTTP API, auth, job enqueue |
-| **Task Queue** | Celery + Redis | Async receipt processing queue |
-| **Message Broker / Cache** | Redis | Celery broker; file-hash caching (`ocr:file_hash:<sha256>`, TTL 90d) |
-| **NoSQL Database** | MongoDB (`motor`) | Job status, raw OCR results, extracted fields, BIR validation, confidence scores |
-| **Vector Database** | PostgreSQL + `pgvector` (`sqlalchemy`, `asyncpg`) | 384-dim receipt embeddings; cosine similarity duplicate detection |
-| **Local LLM** | Ollama (`qwen2.5:1.5b`) | Structured field extraction from raw OCR text |
-| **OCR Engine** | PaddleOCR + Tesseract (`paddleocr`, `pytesseract`) + OpenCV | Image pre-processing + PaddleOCR primary + Tesseract fallback |
-| **Embeddings** | Sentence-Transformers (`all-MiniLM-L6-v2`) | 384-dim vector generation |
-| **ML Anomaly Model** | Scikit-learn (`RandomForestClassifier`) | Receipt anomaly risk scoring (0.0–1.0) |
-| **Settings** | Pydantic Settings | Environment variable management |
-| **Migrations** | Alembic | PostgreSQL schema migrations |
+| Layer                      | Technology                                                  | Role                                                                             |
+| -------------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **API Framework**          | FastAPI (Python 3.12+)                                      | HTTP API, auth, job enqueue                                                      |
+| **Task Queue**             | Celery + Redis                                              | Async receipt processing queue                                                   |
+| **Message Broker / Cache** | Redis                                                       | Celery broker; file-hash caching (`ocr:file_hash:<sha256>`, TTL 90d)             |
+| **NoSQL Database**         | MongoDB (`motor`)                                           | Job status, raw OCR results, extracted fields, BIR validation, confidence scores |
+| **Vector Database**        | PostgreSQL + `pgvector` (`sqlalchemy`, `asyncpg`)           | 384-dim receipt embeddings; cosine similarity duplicate detection                |
+| **Local LLM**              | Ollama (`qwen2.5:1.5b`)                                     | Structured field extraction from raw OCR text                                    |
+| **OCR Engine**             | PaddleOCR + Tesseract (`paddleocr`, `pytesseract`) + OpenCV | Image pre-processing + PaddleOCR primary + Tesseract fallback                    |
+| **Embeddings**             | Sentence-Transformers (`all-MiniLM-L6-v2`)                  | 384-dim vector generation                                                        |
+| **ML Anomaly Model**       | Scikit-learn (`RandomForestClassifier`)                     | Receipt anomaly risk scoring (0.0–1.0)                                           |
+| **Settings**               | Pydantic Settings                                           | Environment variable management                                                  |
+| **Migrations**             | Alembic                                                     | PostgreSQL schema migrations                                                     |
 
 ---
 
@@ -54,31 +56,32 @@ Agents must actively read these files when making integration decisions (e.g., p
 
 ### Container roster
 
-| Container | Host port | Role |
-|-----------|-----------|------|
-| `ocr_api` | `8010` | FastAPI API |
-| `ocr_worker` | — | Celery worker |
-| `ocr_redis` | `6380` | Broker / cache |
-| `ocr_mongo` | `27017` | Job store |
-| `ocr_postgres` | `5433` | Embedding store |
-| `ocr_ollama` | `11434` | Local LLM |
+| Container      | Host port | Role            |
+| -------------- | --------- | --------------- |
+| `ocr_api`      | `8010`    | FastAPI API     |
+| `ocr_worker`   | —         | Celery worker   |
+| `ocr_redis`    | `6380`    | Broker / cache  |
+| `ocr_mongo`    | `27017`   | Job store       |
+| `ocr_postgres` | `5433`    | Embedding store |
+| `ocr_ollama`   | `11434`   | Local LLM       |
 
 ---
 
 ## API surface
 
 All endpoints except `/api/health` require:
+
 ```http
 Authorization: Bearer <SERMS_API_KEY|PRS_API_KEY>
 ```
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/health` | Liveness check (dependency checks currently stubbed — see OPS.md) |
-| `POST` | `/api/ocr/process` | Queue receipt OCR; returns `202 Accepted` + `job_id` |
-| `POST` | `/api/duplicate-check` | Embedding cosine-similarity check against pgvector |
-| `GET` | `/api/jobs/{job_id}/status` | Job status from MongoDB |
-| `GET` | `/api/metrics` | Aggregate processing metrics (currently stub — returns zeros) |
+| Method | Path                        | Description                                                       |
+| ------ | --------------------------- | ----------------------------------------------------------------- |
+| `GET`  | `/api/health`               | Liveness check (dependency checks currently stubbed — see OPS.md) |
+| `POST` | `/api/ocr/process`          | Queue receipt OCR; returns `202 Accepted` + `job_id`              |
+| `POST` | `/api/duplicate-check`      | Embedding cosine-similarity check against pgvector                |
+| `GET`  | `/api/jobs/{job_id}/status` | Job status from MongoDB                                           |
+| `GET`  | `/api/metrics`              | Aggregate processing metrics (currently stub — returns zeros)     |
 
 Full request/response shapes: [`docs/api-contract.md`](api-contract.md).
 Interactive OpenAPI docs (stack must be running): http://localhost:8010/docs
@@ -107,14 +110,14 @@ Each `process_receipt_task` Celery job runs these stages in order:
 
 ### PostgreSQL — `receipt_embeddings`
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | `Integer` PK | Auto-increment |
-| `receipt_id` | `Integer` | Caller-system receipt ID |
-| `source_service` | `String(50)` | `"serms"` or `"prs"` |
-| `embedding` | `Vector(384)` | Dense text embedding |
-| `receipt_text` | `Text` | Raw combined OCR output |
-| `created_at` | `DateTime(tz)` | UTC timestamp |
+| Column           | Type           | Description              |
+| ---------------- | -------------- | ------------------------ |
+| `id`             | `Integer` PK   | Auto-increment           |
+| `receipt_id`     | `Integer`      | Caller-system receipt ID |
+| `source_service` | `String(50)`   | `"serms"` or `"prs"`     |
+| `embedding`      | `Vector(384)`  | Dense text embedding     |
+| `receipt_text`   | `Text`         | Raw combined OCR output  |
+| `created_at`     | `DateTime(tz)` | UTC timestamp            |
 
 Indices: `idx_embeddings_source_service`, `idx_embeddings_created_at`, `idx_embeddings_vector` (IVFFlat/HNSW, optional).
 
@@ -133,18 +136,18 @@ Full schema: [`docs/DSD.md`](DSD.md).
 
 ## Key environment variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `APP_PORT` | `8010` | FastAPI listen port |
-| `SERMS_API_KEY` / `PRS_API_KEY` | — | Inbound Bearer token auth |
-| `CALLBACK_API_KEY` | — | Key attached to outbound webhook callbacks |
-| `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | `http://ocr_ollama:11434` | Local LLM |
-| `REDIS_URL` | `redis://ocr_redis:6379/0` | Celery broker |
-| `MONGODB_URL` / `MONGODB_DATABASE` | `mongodb://ocr_mongo:27017` | Job store |
-| `POSTGRES_URL` | — | Async pgvector connection |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Embedding model id |
-| `DUPLICATE_SIMILARITY_THRESHOLD` | `0.85` | Cosine similarity cutoff |
-| `DUPLICATE_DAYS_WINDOW` | `90` | Lookback window (days) |
+| Variable                           | Default                     | Description                                |
+| ---------------------------------- | --------------------------- | ------------------------------------------ |
+| `APP_PORT`                         | `8010`                      | FastAPI listen port                        |
+| `SERMS_API_KEY` / `PRS_API_KEY`    | —                           | Inbound Bearer token auth                  |
+| `CALLBACK_API_KEY`                 | —                           | Key attached to outbound webhook callbacks |
+| `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | `http://ocr_ollama:11434`   | Local LLM                                  |
+| `REDIS_URL`                        | `redis://ocr_redis:6379/0`  | Celery broker                              |
+| `MONGODB_URL` / `MONGODB_DATABASE` | `mongodb://ocr_mongo:27017` | Job store                                  |
+| `POSTGRES_URL`                     | —                           | Async pgvector connection                  |
+| `EMBEDDING_MODEL`                  | `all-MiniLM-L6-v2`          | Embedding model id                         |
+| `DUPLICATE_SIMILARITY_THRESHOLD`   | `0.85`                      | Cosine similarity cutoff                   |
+| `DUPLICATE_DAYS_WINDOW`            | `90`                        | Lookback window (days)                     |
 
 Full reference: [`docs/SDD.md § 3`](SDD.md).
 
@@ -168,14 +171,15 @@ Full reference: [`docs/SDD.md § 3`](SDD.md).
 
 Defined in `docs/SAD.md § 5`. Materialized to `.agents/subagents/` (Antigravity) and `.claude/agents/*.md` (Claude Code).
 
-| Agent ID | Name | Role | Spawn trigger |
-|----------|------|------|---------------|
-| SAD-A1 | `laravel-endpoint-builder` | Scaffolds Laravel 13 controllers, migrations, queues | Backend task initiation |
-| SAD-A2 | `vue-component-scaffolder` | Scaffolds Vue 3 SPA components | Frontend task initiation |
-| SAD-A3 | `serms-compliance-auditor` | Audits immutable logs, RBAC, BIR logic | On backend component diffs |
-| SAD-A4 | `reusability-auditor` | Enforces Axiom A-09 "Reuse Before You Write" | On any component diffs |
+| Agent ID | Name                       | Role                                                 | Spawn trigger              |
+| -------- | -------------------------- | ---------------------------------------------------- | -------------------------- |
+| SAD-A1   | `laravel-endpoint-builder` | Scaffolds Laravel 13 controllers, migrations, queues | Backend task initiation    |
+| SAD-A2   | `vue-component-scaffolder` | Scaffolds Vue 3 SPA components                       | Frontend task initiation   |
+| SAD-A3   | `serms-compliance-auditor` | Audits immutable logs, RBAC, BIR logic               | On backend component diffs |
+| SAD-A4   | `reusability-auditor`      | Enforces Axiom A-09 "Reuse Before You Write"         | On any component diffs     |
 
 ### Agent Skills
+
 Whenever the `!skill` command is used, or if the user's prompt aligns with the use description of a skill, agents must automatically consider, find, and use the relevant skill located at `C:\Users\mobar\.agents\skills`.
 
 ---
@@ -213,12 +217,12 @@ Full release criteria: [`docs/QAD.md § 6`](QAD.md).
 
 SLOs and alerting thresholds are defined in [`docs/OPS.md`](OPS.md). Quick reference:
 
-| Signal | Target |
-|--------|--------|
-| API availability (`/api/health`) | ≥ 99% uptime |
-| Job processing time (p95) | ≤ 10 s |
-| Celery task success rate | ≥ 97% (after 3 retries) |
-| Callback delivery | 100% on `completed`/`failed` jobs |
-| Composite confidence score | 95% of receipts ≥ 0.75 |
+| Signal                           | Target                            |
+| -------------------------------- | --------------------------------- |
+| API availability (`/api/health`) | ≥ 99% uptime                      |
+| Job processing time (p95)        | ≤ 10 s                            |
+| Celery task success rate         | ≥ 97% (after 3 retries)           |
+| Callback delivery                | 100% on `completed`/`failed` jobs |
+| Composite confidence score       | 95% of receipts ≥ 0.75            |
 
 > **Known stubs:** `/api/health` dependency checks and `/api/metrics` aggregations are not yet wired. Wire before production go-live (see OPS.md self-check).
