@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     # OCR Config
     ocr_language: str = "eng"
 
+    # OCR pool size tuning: which Tesseract variants and PSM modes the escalated
+    # pool runs. Comma-separated lists; variants may be "all" for the full set.
+    # Used by read_pooled/read_best - shrinking these speeds up hard receipts at
+    # the cost of fewer candidate readings to choose from.
+    ocr_pool_variants: str = "all"
+    ocr_pool_psms: str = "6,4,11"
+
     # Image quality gate settings
     image_quality_blur_threshold: float = 80.0
     image_quality_brightness_floor: float = 40.0

@@ -168,9 +168,15 @@ class LLMContextCorrector:
         return items
 
 
-async def normalize_extraction(extraction: Extraction, bundle: OcrBundle) -> None:
-    """In-place mutation of the extraction object to apply normalization rules."""
-    
+async def normalize_extraction(
+    extraction: Extraction, bundle: OcrBundle, use_llm: bool = True
+) -> None:
+    """In-place mutation of the extraction object to apply normalization rules.
+
+    ``use_llm=False`` keeps the deterministic dictionary corrections while
+    skipping the Ollama batch call - used by the single-pass fast path where a
+    round trip to the model would cost more than the correction it could make.
+    """
     dict_corrector = DictionaryCorrector()
     llm_corrector = LLMContextCorrector()
     
@@ -195,6 +201,16 @@ async def normalize_extraction(extraction: Extraction, bundle: OcrBundle) -> Non
             if name:
                 item_dict["name"] = dict_corrector.correct_phrase(name, bundle)
                 
+        if not use_llm:
+            for original_item, corrected_dict in zip(
+                extraction.item_scan.items, items_payload
+            ):
+                corrected_name = corrected_dict.get("name")
+                if corrected_name:
+                    original_item.name = corrected_name
+                    original_item.descriptions.clear()
+            return
+
         # Apply LLM correction
         corrected_payload = await llm_corrector.correct_line_items(items_payload, bundle.combined_text)
         

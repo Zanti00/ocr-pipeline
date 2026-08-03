@@ -9,12 +9,14 @@ OCR Pipeline is a standalone Python/FastAPI microservice providing AI-powered re
 ## Read order (every session)
 
 1. `README.md`
-2. `docs/api-contract.md`
-3. `docs/SDD.md` — routes, tasks, env vars
-4. `docs/DSD.md` — schemas (PostgreSQL, MongoDB, Redis)
-5. `docs/OPS.md` — operational runbook & SLOs
-6. `docs/QAD.md` — QA strategy, test scenarios, release criteria
-7. `docs/AGENTS.md` (this guide)
+2. `docs/SUMMARY.md` — project summary & key user flows
+3. `docs/api-contract.md`
+4. `docs/SDD.md` — routes, tasks, env vars
+5. `docs/DSD.md` — schemas (PostgreSQL, MongoDB, Redis)
+6. `docs/OPS.md` — operational runbook & SLOs
+7. `docs/QAD.md` — QA strategy, test scenarios, release criteria
+8. `docs/sprint.md` — canonical task board (what to do next, task status)
+9. `docs/AGENTS.md` (this guide)
 
 **Full documentation index:** [`docs/index.md`](index.md)
 
@@ -189,6 +191,7 @@ Whenever the `!skill` command is used, or if the user's prompt aligns with the u
 - **Unit tests:** `pytest` + `pytest-asyncio` under `tests/unit/`. All external deps (Ollama, MongoDB, Redis, PostgreSQL) mocked — no live containers required.
 - **Static analysis:** `ruff check .` (lint); `mypy` (type-checking, if configured).
 - **Manual / exploratory:** Postman against `http://localhost:8010` with a valid Bearer token.
+- **Real receipt images:** `docs/receipts/` contains ~30 sample receipt images (jpg/png). Use these as reference for manual testing, validating OCR accuracy, and reproducing extraction issues against real images. These are for local/manual reference only — never add them to `tests/fixtures/` (see fixture policy below).
 - **CI gate:** PRs must not break `pytest` or introduce new lint errors.
 - **Fixture data policy:** Synthetic only — no real receipt images or customer PII in `tests/fixtures/`.
 

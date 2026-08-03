@@ -12,6 +12,7 @@ would carry - only the HTTP delivery, Mongo write and embedding storage are abse
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 import time
@@ -25,7 +26,7 @@ from PIL import Image  # noqa: E402
 
 from app.api.schemas.ocr import build_callback_payload  # noqa: E402
 from app.core.confidence import SERMS_REVIEW_THRESHOLD, compute_confidence  # noqa: E402
-from app.core.extraction import extract  # noqa: E402
+from app.core.extraction import extract, fast_path_sufficient  # noqa: E402
 from app.core.ocr_engine import read_pooled  # noqa: E402
 from app.core.verification import verify  # noqa: E402
 
@@ -47,8 +48,13 @@ def run(path: Path, as_json: bool, show_variants: bool, receipt_id: int) -> int:
 
     started = time.perf_counter()
     image = load_first_page(path)
-    bundle = read_pooled(image, lang="eng")
+    bundle = asyncio.run(read_pooled(image, lang="eng"))
     result = extract(bundle)
+    # Mirror the production early-exit: escalate to the full pool when the
+    # single-pass result does not reconcile.
+    if bundle.early_exit and not fast_path_sufficient(result):
+        bundle = asyncio.run(read_pooled(image, lang="eng", fast_path=False))
+        result = extract(bundle)
 
     verification = verify(
         result.as_dict(),

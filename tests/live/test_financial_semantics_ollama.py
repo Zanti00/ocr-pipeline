@@ -33,7 +33,7 @@ async def test_financial_semantics_is_bounded_for_corpus_receipt(name):
     image = RECEIPTS / name
     if not image.exists():
         pytest.skip(f"fixture unavailable: {name}")
-    bundle = read_pooled(Image.open(image), lang="eng")
+    bundle = await read_pooled(Image.open(image), lang="eng")
     raw = await OllamaProvider().analyze_financial_semantics(bundle.combined_text)
     if raw is None:
         pytest.skip("Ollama unavailable")

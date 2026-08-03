@@ -13,6 +13,11 @@ import httpx
 from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.prompts import (
+    ASSIST_LOCATION_QUESTION,
+    ASSISTS_PROMPT,
+    ASSIST_SEMANTICS_QUESTION,
+    ASSIST_SUBTOTAL_QUESTION,
+    ASSIST_VENDOR_QUESTION,
     CATEGORY_TIEBREAK_PROMPT,
     FINANCIAL_SEMANTICS_PROMPT,
     ITEM_ANALYSIS_PROMPT,
@@ -180,6 +185,67 @@ class OllamaProvider(LLMProvider):
             return float(choice) if choice is not None else None
         except (ValueError, TypeError):
             return None
+
+    async def analyze_assists(
+        self,
+        ocr_text: str,
+        *,
+        vendor_candidates: list[str] | None = None,
+        excluded_vendors: list[str] | None = None,
+        location_candidates: list[str] | None = None,
+        want_semantics: bool = False,
+        want_subtotal: bool = False,
+    ) -> dict | None:
+        """Consolidated bounded assist call: vendor, location, semantics, subtotal.
+
+        One Ollama generation replaces up to four separate calls, which matters
+        on CPU where each generation costs tens of seconds and concurrent calls
+        serialize on the model queue. Every field is still validated by the
+        caller against its closed list before it is used, so a wrong answer stays
+        bounded and a hallucinated one is rejected exactly as before.
+        """
+        questions: list[str] = []
+        shape: list[str] = []
+        if vendor_candidates:
+            questions.append(
+                ASSIST_VENDOR_QUESTION.format(
+                    candidates="\n".join(f"- {line}" for line in vendor_candidates),
+                    excluded="\n".join(f"- {line}" for line in (excluded_vendors or []))
+                    or "- (none)",
+                )
+            )
+            shape.append('"vendor_name": "<exact candidate or null>"')
+        if location_candidates:
+            questions.append(
+                ASSIST_LOCATION_QUESTION.format(
+                    candidates="\n".join(f"- {line}" for line in location_candidates)
+                )
+            )
+            shape.append('"location": "<exact candidate or null>"')
+        if want_semantics:
+            questions.append(ASSIST_SEMANTICS_QUESTION)
+            shape.extend([
+                '"tax_basis": "inclusive|exclusive|unknown"',
+                '"confidence": 0.0',
+                '"evidence": ["short exact snippets"]',
+                '"currency": "ISO-4217|unknown"',
+                '"currency_confidence": 0.0',
+            ])
+        if want_subtotal:
+            questions.append(ASSIST_SUBTOTAL_QUESTION)
+            shape.append('"subtotal": 12.34 or null')
+
+        if not questions:
+            return None
+
+        prompt = ASSISTS_PROMPT.format(
+            questions="\n\n".join(questions),
+            shape=",\n".join(shape),
+            ocr_text=ocr_text[:12000],
+        )
+        return await self._generate(
+            prompt, token_limit=SELECTION_TOKEN_LIMIT + 128, timeout=90.0
+        )
 
     async def normalize_batch_texts(self, texts: list[str], context: str) -> list[str]:
         if not texts:

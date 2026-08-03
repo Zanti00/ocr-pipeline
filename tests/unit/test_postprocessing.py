@@ -103,3 +103,72 @@ async def test_normalize_extraction_item_mutation(mock_bundle, monkeypatch):
     assert extraction.item_scan.items[0].name == "Red Coffee"
     assert len(extraction.item_scan.items[0].descriptions) == 0
     assert extraction.item_scan.items[0].full_name == "Red Coffee"
+
+
+@pytest.mark.asyncio
+async def test_normalize_extraction_use_llm_false_skips_model(mock_bundle, monkeypatch):
+    """Fast path must stay deterministic: dictionary-only, zero model calls."""
+    from app.core.items import ExtractedItem, ItemScan
+    import app.core.postprocessing
+
+    called = {"model": False}
+
+    class FailOnLLM(LLMContextCorrector):
+        def __init__(self):
+            pass
+
+        def correct_phrase(self, phrase, bundle):
+            return phrase
+
+        async def correct_line_items(self, items, context):
+            called["model"] = True
+            return items
+
+    monkeypatch.setattr(
+        app.core.postprocessing, "LLMContextCorrector", FailOnLLM
+    )
+
+    class DictPassthrough:
+        def correct_phrase(self, phrase, bundle):
+            return phrase
+
+    monkeypatch.setattr(app.core.postprocessing, "DictionaryCorrector", DictPassthrough)
+
+    item = ExtractedItem(name="Res Coffee", quantity=1, price=2.50)
+    scan = ItemScan(items=[item])
+    extraction = Extraction()
+    extraction.item_scan = scan
+
+    await app.core.postprocessing.normalize_extraction(
+        extraction, mock_bundle, use_llm=False
+    )
+
+    assert called["model"] is False
+    assert extraction.item_scan.items[0].name == "Res Coffee"
+
+
+@pytest.mark.asyncio
+async def test_normalize_extraction_use_llm_false_preserves_descriptions_clear(mock_bundle, monkeypatch):
+    from app.core.items import ExtractedItem, ItemScan
+    import app.core.postprocessing
+
+    class DictPassthrough:
+        def correct_phrase(self, phrase, bundle):
+            return phrase
+
+    monkeypatch.setattr(app.core.postprocessing, "DictionaryCorrector", DictPassthrough)
+
+    item = ExtractedItem(name="Plain Item", quantity=1, price=2.50)
+    item.descriptions.append("Extra shot")
+    scan = ItemScan(items=[item])
+    extraction = Extraction()
+    extraction.item_scan = scan
+
+    await app.core.postprocessing.normalize_extraction(
+        extraction, mock_bundle, use_llm=False
+    )
+
+    assert extraction.item_scan.items[0].name == "Plain Item Extra shot"
+    assert len(extraction.item_scan.items[0].descriptions) == 0
+    assert extraction.item_scan.items[0].full_name == "Plain Item Extra shot"
+

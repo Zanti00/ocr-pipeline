@@ -63,6 +63,19 @@ class Extraction:
         return dict(self.fields)
 
 
+def fast_path_sufficient(extraction: "Extraction") -> bool:
+    """Can this receipt ship from the single-pass fast path?
+
+    A fast-path result is only trusted when the money actually reconciles and a
+    total is present - the two conditions that make the receipt usable for a
+    reimbursement claim. Anything less escalates to the full OCR pool, which is
+    where hard receipts keep their accuracy.
+    """
+    if not extraction.reconciled:
+        return False
+    return extraction.fields.get("total_amount") is not None
+
+
 def extract(
     bundle: OcrBundle,
     *,
@@ -95,7 +108,9 @@ def extract(
     )
 
     inferred_basis, basis_evidence = infer_tax_basis(combined, locale.country)
-    is_fallback = basis_evidence in (["PH country fallback"], ["US country fallback"])
+    is_fallback = basis_evidence in (
+        ["PH country fallback"], ["US country fallback"], ["MY SST/GST fallback"],
+    )
     
     if financial_semantics:
         if is_fallback or inferred_basis == "unknown":

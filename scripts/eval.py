@@ -152,12 +152,19 @@ def sweep() -> int:
     return 0
 
 
-def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> int:
+def accuracy(
+    verbose: bool,
+    corpus: str = "real",
+    limit: int | None = None,
+    names: list[str] | None = None,
+) -> int:
     """Score deterministic extraction against ground truth. No LLM required."""
+    import asyncio
+
     from PIL import Image
 
     from app.core.confidence import SERMS_REVIEW_THRESHOLD, compute_confidence
-    from app.core.extraction import extract
+    from app.core.extraction import extract, fast_path_sufficient
     from app.core.ocr_engine import read_pooled
     from app.core.verification import verify
     from app.eval.compare import Outcome, classify, is_grounded
@@ -168,8 +175,14 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
     )
 
     truths = [t for t in load_ground_truth(corpus=corpus) if t.image_path.exists()]
+    if names:
+        wanted = {Path(name).name for name in names}
+        truths = [t for t in truths if Path(t.image).name in wanted]
     if limit:
         truths = truths[:limit]
+    if not truths:
+        print(f"no receipts matched the filter (corpus={corpus})", file=sys.stderr)
+        return 1
     print(f"corpus: {corpus}  ({len(truths)} receipts)")
     tallies = empty_tallies(spec.name for spec in FIELD_SPECS)
     populated = ungrounded_total = 0
@@ -182,8 +195,14 @@ def accuracy(verbose: bool, corpus: str = "real", limit: int | None = None) -> i
 
     for truth in truths:
         with Image.open(truth.image_path) as img:
-            bundle = read_pooled(img, lang="eng")
+            bundle = asyncio.run(read_pooled(img, lang="eng"))
         result = extract(bundle)
+        # Mirror the production early-exit: escalate to the full pool when the
+        # single-pass result does not reconcile.
+        if bundle.early_exit and not fast_path_sufficient(result):
+            with Image.open(truth.image_path) as img:
+                bundle = asyncio.run(read_pooled(img, lang="eng", fast_path=False))
+            result = extract(bundle)
 
         verification = verify(
             result.as_dict(),
@@ -427,6 +446,8 @@ def main() -> int:
     acc.add_argument("--corpus", choices=sorted(CORPORA), default="real")
     acc.add_argument("--limit", type=int, default=None,
                      help="score only the first N receipts")
+    acc.add_argument("--names", nargs="+", default=None,
+                     help="score only receipts whose filename matches (repeatable)")
 
     args = parser.parse_args()
     if args.mode == "recoverability":
@@ -434,7 +455,8 @@ def main() -> int:
     if args.mode == "sweep":
         return sweep()
     if args.mode == "accuracy":
-        return accuracy(args.verbose, corpus=args.corpus, limit=args.limit)
+        return accuracy(args.verbose, corpus=args.corpus, limit=args.limit,
+                        names=args.names)
     return 1
 
 

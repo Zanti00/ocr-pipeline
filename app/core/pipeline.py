@@ -28,7 +28,7 @@ from PIL import Image
 from app.core.callback import send_callback
 import time
 from app.core.confidence import ConfidenceBreakdown, compute_confidence
-from app.core.extraction import Extraction, extract
+from app.core.extraction import Extraction, extract, fast_path_sufficient
 from app.core.ocr_engine import OcrBundle, rank_candidates, read_pooled
 from app.core.pdf_handler import pdf_to_images
 from app.core.image_stitcher import stitch_segments
@@ -129,11 +129,23 @@ async def process_receipt(
         )
 
         t0_embed = time.perf_counter()
-        await _store_embedding(receipt_id, source_service, bundle.combined_text)
+        embedding = None
+        if bundle.combined_text.strip():
+            try:
+                embedding = await asyncio.to_thread(
+                    EmbeddingGenerator.generate, bundle.combined_text
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Embedding generation failed for receipt %s: %s", receipt_id, exc
+                )
+        await _store_embedding(receipt_id, source_service, bundle.combined_text, embedding)
         t_embed = time.perf_counter() - t0_embed
 
         t0_dup = time.perf_counter()
-        is_dup, dup_score, matches = await _evaluate_duplicate(receipt_id, source_service, bundle.combined_text)
+        is_dup, dup_score, matches = await _evaluate_duplicate(
+            receipt_id, source_service, bundle.combined_text, embedding
+        )
         t_dup = time.perf_counter() - t0_dup
 
         await MongoDBClient.update_job_status(
@@ -216,6 +228,29 @@ async def _read_and_extract(
             bundle = await read_pooled(image, lang="eng")
             t_engine = time.perf_counter() - t0_engine
 
+            if bundle.early_exit:
+                baseline = extract(
+                    bundle,
+                    caller_country=caller_country,
+                    caller_currency=caller_currency,
+                    caller_location=caller_location,
+                )
+                if fast_path_sufficient(baseline):
+                    await normalize_extraction(baseline, bundle, use_llm=False)
+                    return bundle, baseline, t_engine, 0.0
+
+                # Single pass could not reconcile the receipt: escalate to the
+                # full pool so hard receipts keep the exact pooled accuracy.
+                logger.info(
+                    "Page %s fast path insufficient (reconciled=%s, total=%s); "
+                    "escalating to pooled OCR",
+                    index, baseline.reconciled,
+                    baseline.fields.get("total_amount") is not None,
+                )
+                t0_engine = time.perf_counter()
+                bundle = await read_pooled(image, lang="eng", fast_path=False)
+                t_engine += time.perf_counter() - t0_engine
+
             t0_llm = time.perf_counter()
             extraction = await _extract_with_assists(
                 bundle,
@@ -270,11 +305,13 @@ async def _extract_with_assists(
     caller_currency: str | None = None,
     caller_location: str | None = None,
 ) -> Extraction:
-    """Deterministic extraction, then optional model and embedding assists.
+    """Deterministic extraction, then one bounded model assist call.
 
-    Runs the deterministic pass first so a shortlist exists to constrain the model
-    with. Both assists are best-effort: any failure leaves the deterministic
-    result in place.
+    Runs the deterministic pass first so shortlists exist to constrain the model
+    with. All model asks - vendor, location, semantics, subtotal - are answered
+    by a SINGLE generation, because on a CPU-only Ollama every generation costs
+    tens of seconds and concurrent calls serialize on the model queue. Any
+    failure leaves the deterministic result in place.
     """
     baseline = extract(
         bundle,
@@ -283,49 +320,63 @@ async def _extract_with_assists(
         caller_location=caller_location,
     )
 
-    async def fetch_semantics():
-        if semantics_requested(
-            bundle.combined_text, currency_ambiguous=baseline.fields.get("currency") is None
-        ):
-            sem = await _ask_model_for_financial_semantics(bundle.combined_text)
-            arithmetic = _grounded_exclusive_basis(baseline, sem)
-            return arithmetic if arithmetic is not None else sem
-        return None
+    vendor_candidates = baseline.vendor_choice.shortlist if baseline.vendor_choice else []
+    if len(vendor_candidates) < 2:
+        vendor_candidates = []
 
-    async def fetch_vendor():
-        return await _ask_model_for_vendor(baseline)
+    location_candidates = baseline.address_candidates
+    if len(location_candidates) < 2:
+        location_candidates = []
 
-    async def fetch_location():
-        return await _ask_model_for_location(baseline)
+    money = baseline.money
+    want_subtotal = False
+    if money and money.get("net_sales") is not None:
+        net_sales = money.get("net_sales")
+        total = money.get("total_amount")
+        is_impossible = total is not None and net_sales > total + 0.05
+        reconciled_on_net = (
+            baseline.item_scan and baseline.item_scan.reconciled
+            and baseline.item_scan.target == net_sales
+        )
+        want_subtotal = is_impossible or (
+            baseline.item_scan and baseline.item_scan.count > 0
+            and not reconciled_on_net
+        )
 
-    async def fetch_subtotal():
-        money = baseline.money
-        item_scan = baseline.item_scan
-        if money and money.get("net_sales") is not None:
-            net_sales = money.get("net_sales")
-            total = money.get("total_amount")
-            is_impossible = total is not None and net_sales > total + 0.05
-            reconciled_on_net = item_scan and item_scan.reconciled and item_scan.target == net_sales
-            if is_impossible or (item_scan and item_scan.count > 0 and not reconciled_on_net):
-                return await _ask_model_for_subtotal(bundle.combined_text)
-        return None
-
-    results = await asyncio.gather(
-        fetch_semantics(),
-        fetch_vendor(),
-        fetch_location(),
-        fetch_subtotal(),
-        return_exceptions=True
+    want_semantics = semantics_requested(
+        bundle.combined_text, currency_ambiguous=baseline.fields.get("currency") is None
     )
 
-    semantics = results[0] if not isinstance(results[0], Exception) else None
-    vendor_choice = results[1] if not isinstance(results[1], Exception) else None
-    location_choice = results[2] if not isinstance(results[2], Exception) else None
-    corrected_subtotal = results[3] if not isinstance(results[3], Exception) else None
+    semantics: FinancialSemantics | None = None
+    vendor_choice: str | None = None
+    location_choice: str | None = None
+    corrected_subtotal: float | None = None
+
+    if vendor_candidates or location_candidates or want_semantics or want_subtotal:
+        raw = await _ask_model_for_assists(
+            bundle.combined_text,
+            vendor_candidates=vendor_candidates,
+            excluded_vendors=baseline.vendor_candidates.customer_names,
+            location_candidates=location_candidates,
+            want_semantics=want_semantics,
+            want_subtotal=want_subtotal,
+        )
+        if raw:
+            if want_semantics:
+                sem = validate_financial_semantics(raw, bundle.combined_text)
+                arithmetic = _grounded_exclusive_basis(baseline, sem)
+                semantics = arithmetic if arithmetic is not None else sem
+            if vendor_candidates:
+                vendor_choice = _closed_list_pick(raw.get("vendor_name"), vendor_candidates)
+            if location_candidates:
+                location_choice = _closed_list_pick(raw.get("location"), location_candidates)
+            if want_subtotal:
+                corrected_subtotal = _float_or_none(raw.get("subtotal"))
 
     embedder = _embedder()
 
-    if vendor_choice is None and location_choice is None and embedder is None and semantics is None and corrected_subtotal is None:
+    if (vendor_choice is None and location_choice is None and embedder is None
+            and semantics is None and corrected_subtotal is None):
         await normalize_extraction(baseline, bundle)
         return baseline
 
@@ -347,6 +398,23 @@ async def _extract_with_assists(
     
     await normalize_extraction(final_extraction, bundle)
     return final_extraction
+
+
+def _closed_list_pick(value: object, candidates: list[str]) -> str | None:
+    """Reject any answer outside the offered closed list."""
+    if not value or not isinstance(value, str):
+        return None
+    picked = value.strip()
+    return picked if picked in candidates else None
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _grounded_exclusive_basis(
@@ -375,59 +443,31 @@ def _grounded_exclusive_basis(
         currency_confidence=current.currency_confidence if current else 0.0,
         currency_evidence=current.currency_evidence if current else (), source="arithmetic",
     )
-async def _ask_model_for_financial_semantics(ocr_text: str) -> FinancialSemantics | None:
+async def _ask_model_for_assists(
+    ocr_text: str,
+    *,
+    vendor_candidates: list[str],
+    excluded_vendors: list[str] | None = None,
+    location_candidates: list[str],
+    want_semantics: bool,
+    want_subtotal: bool,
+) -> dict | None:
+    """One bounded model call answering all requested assists.
+
+    Returns the raw JSON object; field-level validation happens in the caller.
+    """
     try:
         provider = create_provider()
-        raw = await provider.analyze_financial_semantics(ocr_text)
-        return validate_financial_semantics(raw, ocr_text)
-    except Exception as exc:
-        logger.warning("Financial semantics unavailable, keeping deterministic result: %s", exc)
-        return None
-
-
-async def _ask_model_for_subtotal(ocr_text: str) -> float | None:
-    try:
-        provider = create_provider()
-        return await provider.verify_subtotal(ocr_text)
-    except Exception as exc:
-        logger.warning("Subtotal verification unavailable, keeping deterministic pick: %s", exc)
-        return None
-
-
-async def _ask_model_for_vendor(baseline: Extraction) -> str | None:
-    shortlist = baseline.vendor_choice.shortlist if baseline.vendor_choice else []
-    if len(shortlist) < 2:
-        return None
-    try:
-        provider = create_provider()
-        return await provider.select_vendor_name(
-            shortlist, baseline.vendor_candidates.customer_names
+        return await provider.analyze_assists(
+            ocr_text,
+            vendor_candidates=vendor_candidates or None,
+            excluded_vendors=excluded_vendors,
+            location_candidates=location_candidates or None,
+            want_semantics=want_semantics,
+            want_subtotal=want_subtotal,
         )
     except Exception as exc:
-        logger.warning("Vendor selection unavailable, keeping deterministic pick: %s", exc)
-        return None
-
-
-async def _ask_model_for_location(baseline: Extraction) -> str | None:
-    candidates = baseline.address_candidates
-    if len(candidates) < 2:
-        return None
-    try:
-        provider = create_provider()
-        return await provider.select_location(candidates)
-    except Exception as exc:
-        logger.warning("Location selection unavailable, keeping deterministic pick: %s", exc)
-        return None
-
-
-async def _ask_model_for_items(baseline: Extraction) -> list[dict] | None:
-    if baseline.item_scan and baseline.item_scan.count > 0:
-        return None
-    try:
-        provider = create_provider()
-        return await provider.analyze_line_items(baseline.lines)
-    except Exception as exc:
-        logger.warning("Item analysis assist unavailable, keeping deterministic items: %s", exc)
+        logger.warning("Model assists unavailable, keeping deterministic result: %s", exc)
         return None
 
 
@@ -454,7 +494,9 @@ def _tax_id_ambiguous(extraction: Extraction) -> bool:
     return len([c for c in candidates if c.role == "unknown"]) > 1
 
 
-async def _store_embedding(receipt_id: int, source_service: str, text: str) -> None:
+async def _store_embedding(
+    receipt_id: int, source_service: str, text: str, embedding: list[float] | None = None
+) -> None:
     """Persist a text embedding for duplicate detection.
 
     Deliberately non-fatal: duplicate detection is a separate concern, and losing
@@ -463,7 +505,8 @@ async def _store_embedding(receipt_id: int, source_service: str, text: str) -> N
     if not text.strip():
         return
     try:
-        embedding = await asyncio.to_thread(EmbeddingGenerator.generate, text)
+        if embedding is None:
+            embedding = await asyncio.to_thread(EmbeddingGenerator.generate, text)
         async with AsyncSessionLocal() as session:
             session.add(
                 ReceiptEmbedding(
@@ -479,7 +522,7 @@ async def _store_embedding(receipt_id: int, source_service: str, text: str) -> N
 
 
 async def _evaluate_duplicate(
-    receipt_id: int, source_service: str, text: str
+    receipt_id: int, source_service: str, text: str, embedding: list[float] | None = None
 ) -> tuple[bool, float | None, list]:
     """Check pgvector for duplicate receipts within the configured lookback window.
 
@@ -488,7 +531,8 @@ async def _evaluate_duplicate(
     if not text.strip():
         return False, None, []
     try:
-        embedding = await asyncio.to_thread(EmbeddingGenerator.generate, text)
+        if embedding is None:
+            embedding = await asyncio.to_thread(EmbeddingGenerator.generate, text)
         async with AsyncSessionLocal() as session:
             matches = await find_similar_receipts(
                 session=session,

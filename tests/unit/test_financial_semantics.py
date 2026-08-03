@@ -76,6 +76,17 @@ def test_currency_precedence_caller_then_receipt_then_country_then_ocr():
 import pytest
 
 
+def test_my_sst_receipt_infers_exclusive_basis():
+    # 'SST 6%' after a subtotal means tax is added on top (net + tax = total),
+    # which lets reconcile derive total_sales for Malaysian receipts.
+    from app.core.financial_semantics import infer_tax_basis
+    basis, evidence = infer_tax_basis(
+        "Subtotal 17.00\nSST 6% 1.02\nTOTAL 18.02", country="MY"
+    )
+    assert basis == "exclusive"
+    assert evidence == ["MY SST/GST fallback"]
+
+
 @pytest.mark.asyncio
 async def test_ollama_financial_semantics_is_dedicated_and_fail_soft(monkeypatch):
     from app.llm.ollama_provider import OllamaProvider

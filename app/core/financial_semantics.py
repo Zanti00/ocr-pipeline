@@ -101,6 +101,9 @@ def infer_tax_basis(text: str, country: str | None = None) -> tuple[str, list[st
         return "exclusive", [exclusive.group(0)]
     if country == "US" and re.search(r"\b(?:sales\s+)?tax\b", lowered):
         return "exclusive", ["US country fallback"]
+    if country == "MY" and re.search(r"\b(?:sst|gst)\b", lowered):
+        # Malaysian receipts add SST/GST on top of the subtotal (net + tax = total).
+        return "exclusive", ["MY SST/GST fallback"]
     if country == "PH":
         return "inclusive", ["PH country fallback"]
     return UNKNOWN, []

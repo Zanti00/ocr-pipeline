@@ -138,3 +138,45 @@ Texts to Correct (JSON Array):
 Respond with a single JSON object containing an array of corrected texts:
 {{"corrected_texts": ["corrected text 1", "corrected text 2", ...]}}
 """
+
+
+ASSISTS_PROMPT = """Answer ONLY the questions below about this receipt OCR text, and nothing else.
+
+{questions}
+
+Rules for every answer:
+- If the answer is not visible in the text, or you are unsure, return null.
+- Never invent, reformat, or "correct" values.
+- Respond with JSON only. Keys not listed below are FORBIDDEN.
+
+RESPONSE SHAPE:
+{shape}
+
+OCR TEXT:
+{ocr_text}
+"""
+
+
+ASSIST_VENDOR_QUESTION = """Question 1: Choose the line that is the NAME OF THE BUSINESS that issued the receipt.
+CANDIDATES:
+{candidates}
+DO_NOT_CHOOSE (the customer or payer):
+{excluded}
+The vendor_name value MUST be one of the CANDIDATES, copied character for character, or null.
+"""
+
+ASSIST_LOCATION_QUESTION = """Question 2: Choose the line that is the LOCATION (city/area/address) of the business.
+CANDIDATES:
+{candidates}
+The location value MUST be one of the CANDIDATES, copied character for character, or null.
+"""
+
+ASSIST_SEMANTICS_QUESTION = """Question 3: Classify financial semantics ONLY. Do NOT extract, copy, infer or calculate any amount.
+tax_basis is inclusive only when the receipt wording says tax is included, exclusive only when wording
+says tax is added or net/before tax, otherwise unknown. currency must be an ISO-4217 code only when the
+code or an unambiguous symbol is visible in the OCR, otherwise unknown.
+"""
+
+ASSIST_SUBTOTAL_QUESTION = """Question 4: Find the explicitly printed subtotal (net sales before tax), NOT a calculation.
+Look for labels like "Subtotal", "Sub-total", "Net Sales", or "Amount Net of VAT". If none is printed, return null.
+"""

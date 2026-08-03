@@ -121,6 +121,21 @@ class TestInvoiceNumber:
         )
         assert number is None
 
+    def test_semicolon_separator_from_fast_path(self):
+        # Fast-path OCR read 'Invoice number; 45065' (semicolon instead of colon).
+        number, evidence = find_invoice_number(
+            ["Mydin Wholesale Sdn. Bhd.", "21-10-2024", "Invoice number; 45065"]
+        )
+        assert number == "45065"
+        assert "45065" in evidence
+
+    def test_comma_separator_from_fast_path(self):
+        # Fast-path OCR read 'No, 38326 ...' (comma instead of dot).
+        number, _ = find_invoice_number(
+            ["No, 38326 aoe aera : _Date: 07-05-2026", "SALES INVOICE"]
+        )
+        assert number == "38326"
+
 
 class TestAddressCandidates:
     def test_extracts_address_candidate_from_lines(self):

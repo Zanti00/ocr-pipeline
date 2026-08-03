@@ -47,6 +47,25 @@ class LLMProvider(ABC):
         """Extract the explicitly printed subtotal (net sales before tax) from the text."""
         return None
 
+    async def analyze_assists(
+        self,
+        ocr_text: str,
+        *,
+        vendor_candidates: list[str] | None = None,
+        excluded_vendors: list[str] | None = None,
+        location_candidates: list[str] | None = None,
+        want_semantics: bool = False,
+        want_subtotal: bool = False,
+    ) -> dict | None:
+        """One consolidated bounded call answering the requested assists.
+
+        Replaces up to four separate generations (vendor, location, semantics,
+        subtotal). Returning ``None`` means "no opinion"; the caller keeps its
+        deterministic result and each field is validated against its closed list
+        before use.
+        """
+        return None
+
     async def normalize_text(self, text: str, context: str) -> str:
         """Correct spelling mistakes in a specific text snippet using full receipt context."""
         return text

@@ -171,11 +171,11 @@ Interactive OpenAPI docs (when API is up): http://localhost:8010/docs
 For each queued job the worker:
 
 1. Downloads the file from `file_url` (image or PDF)
-2. Preprocesses with OpenCV; runs PaddleOCR and Tesseract across the existing candidate pool, selecting the strongest reading by receipt-aware anchor scoring while retaining all candidates for reconciliation
-3. Extracts structured fields via Ollama (vendor, date, amounts, TIN, line items, category, …)
+2. Preprocesses with OpenCV; **fast path (early exit)**: a single Tesseract pass ships the receipt when its anchor score is high and the money reconciles with a total present — otherwise the worker escalates to PaddleOCR + the Tesseract candidate pool, selecting the strongest reading by receipt-aware anchor scoring while retaining all candidates for reconciliation
+3. Extracts structured fields via Ollama: **one consolidated assist call** answers vendor, location, tax/currency semantics, and subtotal questions; the fast path skips the model entirely (dictionary-only normalization)
 4. Validates TIN and classifies VAT (BIR rules)
 5. Computes a composite confidence score
-6. Stores a text embedding in PostgreSQL (pgvector)
+6. Stores a text embedding in PostgreSQL (pgvector) — computed once per job and reused for duplicate detection
 7. Persists job outcome in MongoDB
 8. Sends the consumer webhook callback (with retries)
 

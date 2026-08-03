@@ -88,3 +88,21 @@ def test_unambiguous_currency_symbols():
     assert detect_locale("TOTAL RM50.00").currency == "MYR"
     assert detect_locale("TOTAL £15.50").currency == "GBP"
     assert detect_locale("TOTAL €20.00").currency == "EUR"
+
+
+def test_sdn_bhd_company_suffix_is_not_currency():
+    # 'Sdn. Bhd.' (Malaysian private-limited company suffix) must not be read
+    # as the BHD (Bahraini Dinar) currency code.
+    text = (
+        "Mydin Wholesale Sdn. Bhd.\n"
+        "Lot 5 Jalan Tun Razak\n"
+        "Kuala Lumpur, Malaysia\n"
+        "Sdn. Bhd. SST Reg. No, 8354457128\n"
+        "Subtotal 17.00\n"
+        "SST 6% 1.02\n"
+        "TOTAL 18.02"
+    )
+    guess = detect_locale(text)
+    assert guess.country == "MY"
+    assert guess.currency == "MYR"
+    assert guess.resolved is True

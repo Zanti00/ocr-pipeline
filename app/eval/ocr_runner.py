@@ -7,6 +7,7 @@ reported as a delta against it.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def run_baseline(image_path: Path) -> OcrResult:
 def run_optimized(image_path: Path) -> OcrResult:
     """New path: preprocessing variants x page-segmentation modes, anchor-selected."""
     with Image.open(image_path) as img:
-        best, _ = read_best(img, lang="eng")
+        best, _ = asyncio.run(read_best(img, lang="eng"))
     return OcrResult(
         label=f"optimized({best.engine}/{best.variant}/psm{best.psm})",
         text=best.text,
@@ -57,9 +58,15 @@ def run_optimized(image_path: Path) -> OcrResult:
 
 
 def run_pooled(image_path: Path, pool_size: int = 4) -> OcrResult:
-    """Run the production candidate-selected OCR path."""
+    """Run the production candidate-selected OCR path.
+
+    Forces the full pool: the harness compares the pooled path against single
+    variants, so the early-exit fast path would make this variant measure
+    something different from what it names.
+    """
     with Image.open(image_path) as img:
-        bundle = read_pooled(img, lang="eng", pool_size=pool_size)
+        bundle = asyncio.run(read_pooled(img, lang="eng", pool_size=pool_size,
+                                         fast_path=False))
     labels = "+".join(
         [bundle.primary.label] + [reading.label for reading in bundle.supporting]
     )

@@ -10,14 +10,19 @@ import pytest_asyncio
 
 @pytest.fixture(scope="session")
 def bundles():
-    """Cache bundles to avoid re-running OCR during regression tests."""
+    """Cache bundles to avoid re-running OCR during regression tests.
+
+    Forces the full pool: these tests assert extraction correctness against the
+    multi-pass OCR bundle, which is the semantics they were written for.
+    """
     cache = {}
     async def _get(name):
         if name not in cache:
             path = RECEIPTS / name
             if not path.exists():
                 pytest.skip(f"fixture unavailable: {name}")
-            cache[name] = await read_pooled(Image.open(path), lang="eng")
+            cache[name] = await read_pooled(Image.open(path), lang="eng",
+                                            fast_path=False)
         return cache[name]
     return _get
 

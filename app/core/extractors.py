@@ -341,8 +341,8 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
 # otherwise be captured as '038' - a receipt number that never existed.
 INVOICE_LABEL_RE = re.compile(
     r"(?:invoice\s*(?:number|no|#)|receipt\s*(?:no|#)|"
-    r"\bor\s*no|\bchk\s*no|\bcheck\s*no|\bno[.:\u00b0\u00ba]|\bn[\u00b0\u00ba\u00a9\u00a2])"
-    r"\s*[:.#]?\s*([0-9]{3,8})(?![0-9A-Za-z])",
+    r"\bor\s*no|\bchk\s*no|\bcheck\s*no|\bno[.:;,\u00b0\u00ba]|\bn[\u00b0\u00ba\u00a9\u00a2])"
+    r"\s*[:.;,#]?\s*([0-9]{3,8})(?![0-9A-Za-z])",
     re.IGNORECASE,
 )
 

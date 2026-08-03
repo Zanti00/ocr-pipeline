@@ -182,12 +182,16 @@ def explicit_currency(text: str) -> str | None:
         line, re.IGNORECASE,
     )]
     for candidate in (*preferred, text):
-        match = re.search(
+        for match in re.finditer(
             r"\b(AED|ARS|AUD|BHD|BND|BRL|CAD|CHF|CNY|COP|CZK|DKK|EGP|EUR|GBP|HKD|IDR|ILS|INR|JPY|KRW|KWD|MYR|MXN|NOK|NZD|PHP|PLN|QAR|RUB|SAR|SEK|SGD|THB|TRY|TWD|USD|VND|ZAR)\b",
             candidate, re.IGNORECASE,
-        )
-        if match:
-            return match.group(1).upper()
+        ):
+            code = match.group(1).upper()
+            # 'Sdn. Bhd.' - Malaysian company suffix, not the BHD currency code.
+            before = candidate[max(0, match.start() - 8):match.start()]
+            if code == "BHD" and re.search(r"\bsdn\.?\s*$", before, re.IGNORECASE):
+                continue
+            return code
         symbol = _currency_from_symbol(candidate.casefold())
         if symbol:
             return symbol
