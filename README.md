@@ -118,6 +118,8 @@ Copy from `.env.example`. Important keys:
 | `EMBEDDING_MODEL` | Sentence-Transformers model id |
 | `DUPLICATE_SIMILARITY_THRESHOLD` | Cosine similarity cutoff (default `0.85`) |
 | `DUPLICATE_DAYS_WINDOW` | Lookback window in days (default `90`) |
+| `OCR_POOL_VARIANTS` / `OCR_POOL_PSMS` | Escalated OCR pool size (variants × PSM modes); `all` + `6,4,11` default. Shrinking trades accuracy for speed on hard receipts |
+| `OMP_NUM_THREADS` / `OMP_THREAD_LIMIT` | Must be `1` in the worker container — without this, concurrent Tesseract pool passes thrash the CPU (measured 26× slower than sequential) |
 
 The app loads `.env` via pydantic-settings (mounted into containers at `/app`).
 

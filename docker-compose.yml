@@ -36,6 +36,14 @@ services:
       - MONGODB_URL=mongodb://ocr_mongo:27017
       - POSTGRES_URL=postgresql+asyncpg://ocr_user:secret@ocr_postgres:5432/ocr_pipeline
       - OLLAMA_BASE_URL=http://ocr_ollama:11434
+      # Cap OpenMP threads per process. The OCR pool runs Tesseract passes
+      # concurrently; each subprocess would otherwise spawn a full OpenMP team
+      # (8 threads), and 6 concurrent passes thrash the CPU - measured 26x
+      # SLOWER than sequential (258-309s vs 12s for the same 15-pass grid).
+      # With OMP capped to 1 thread per subprocess the grid runs in ~4s with
+      # identical readings.
+      - OMP_NUM_THREADS=1
+      - OMP_THREAD_LIMIT=1
     depends_on:
       - redis
       - mongodb
