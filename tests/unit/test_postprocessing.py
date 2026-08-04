@@ -172,3 +172,80 @@ async def test_normalize_extraction_use_llm_false_preserves_descriptions_clear(m
     assert len(extraction.item_scan.items[0].descriptions) == 0
     assert extraction.item_scan.items[0].full_name == "Plain Item Extra shot"
 
+
+
+@pytest.mark.asyncio
+async def test_llm_corrector_skips_store_code_receipts(monkeypatch):
+    import app.core.postprocessing
+    from app.llm.base import LLMProvider
+
+    called = {"batch": False}
+
+    class CodeOnlyProvider(LLMProvider):
+        async def extract_receipt_fields(self, ocr_text: str) -> dict:
+            return {}
+
+        async def normalize_batch_texts(self, texts, context):
+            called["batch"] = True
+            return texts
+
+    monkeypatch.setattr(app.core.postprocessing, "create_provider",
+                        lambda: CodeOnlyProvider())
+
+    corrector = LLMContextCorrector()
+    items = [
+        {"name": "DRD PEV-CUT EP025G", "quantity": 1, "price": 64.00},
+        {"name": "CA05SINI BVANCA4JG", "quantity": 1, "price": 17.15},
+        {"name": "JNJ MRCHPSN / CHS24G", "quantity": 1, "price": 122.00},
+    ]
+    corrected = await corrector.correct_line_items(items, "raw ocr text")
+
+    assert called["batch"] is False
+    assert corrected == items
+
+
+@pytest.mark.asyncio
+async def test_llm_corrector_skips_when_codes_are_majority(monkeypatch):
+    import app.core.postprocessing
+
+    called = {"batch": False}
+
+    class MixedProvider:
+        async def normalize_batch_texts(self, texts, context):
+            called["batch"] = True
+            return texts
+
+    monkeypatch.setattr(app.core.postprocessing, "create_provider",
+                        lambda: MixedProvider())
+
+    corrector = LLMContextCorrector()
+    items = [
+        {"name": "DRD PEV-CUT EP025G", "quantity": 1, "price": 64.00},
+        {"name": "CA05SINI BVANCA4JG", "quantity": 1, "price": 17.15},
+        {"name": "JNJ MRCHPSN / CHS24G", "quantity": 1, "price": 122.00},
+        {"name": "COFFEE", "quantity": 1, "price": 3.00},
+    ]
+    await corrector.correct_line_items(items, "raw ocr text")
+
+    assert called["batch"] is False
+
+
+@pytest.mark.asyncio
+async def test_llm_corrector_still_corrects_word_names(monkeypatch):
+    import app.core.postprocessing
+
+    class WordProvider:
+        async def normalize_batch_texts(self, texts, context):
+            return ["Res Coffee"] if "Res" in texts[0] else texts
+
+    monkeypatch.setattr(app.core.postprocessing, "create_provider",
+                        lambda: WordProvider())
+
+    corrector = LLMContextCorrector()
+    items = [
+        {"name": "Res Coffee", "quantity": 1, "price": 2.50},
+        {"name": "Bottled Water", "quantity": 1, "price": 1.00},
+    ]
+    corrected = await corrector.correct_line_items(items, "Res Coffee 2.50")
+
+    assert corrected[0]["name"] == "Res Coffee"

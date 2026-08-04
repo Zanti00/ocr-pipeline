@@ -170,7 +170,7 @@ async def process_receipt(
             receipt_id=receipt_id,
             fields=callback_fields,
             confidence=breakdown.score,
-            status="completed",
+            status="rejected" if is_dup else "completed",
             items=extraction.item_scan.payload() if extraction.item_scan else [],
             tax_basis=(extraction.fields.get("tax_basis") if has_callback_semantics else None),
             financial_reconciliation_status=(
@@ -180,7 +180,10 @@ async def process_receipt(
             needs_manual_review=(
                 verification.needs_manual_review or extraction.fields.get("needs_manual_review", False)
             ) if has_callback_semantics else None,
+            is_duplicate=is_dup,
             duplicate_similarity=dup_score,
+            rejection_code="duplicate" if is_dup else None,
+            rejection_reason="Duplicate receipt detected based on semantic similarity." if is_dup else None,
         )
         logger.info(
             "Job %s complete: engine=%s variant=%s psm=%s score=%.3f reasons=%s. "

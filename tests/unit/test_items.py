@@ -10,7 +10,8 @@ from __future__ import annotations
 import pytest
 
 from app.core.items import (
-    UNREADABLE_NAME, ExtractedItem, parse_items, reconcile_items,
+    UNREADABLE_NAME, ExtractedItem, looks_like_store_code, parse_items,
+    reconcile_items,
 )
 from app.core.ocr_engine import Word
 
@@ -178,3 +179,69 @@ class TestReconciliation:
         scan = reconcile_items(self._items((1, 12.00)), {"net_sales": 12.00})
         scan.items.append(ExtractedItem(name="free", quantity=1, price=price))
         assert all(row["price"] > 0 for row in scan.payload())
+
+
+class TestGroceryPriceFirstLayout:
+    """Grocery-POS receipts print price first, then qty x price, then the
+    barcode + store-code name line ('64.00 V' / '1 x 64.00' / '4800016522533 DRD PEV-CUT EP025G').
+    Each physical item must produce ONE row named from the barcode line.
+    """
+
+    def test_price_first_three_line_item(self):
+        items = parse_items(_lines(
+            "64.00   V",
+            "1  ×  64.00",
+            "4800016522533   DRD   PEV-CUT   EP025G",
+            "Subtotal 64.00",
+        ))
+        assert len(items) == 1
+        assert items[0].price == 64.00
+        assert items[0].quantity == 1
+        assert "DRD PEV-CUT EP025G" in items[0].full_name
+        assert items[0].name != "V"
+
+    def test_quantity_line_merges_into_pending_item(self):
+        items = parse_items(_lines(
+            "44.90   V",
+            "3   x   44.00",
+            "0998066630917   WING5   SFF2XW5H100G",
+            "Subtotal 134.70",
+        ))
+        assert len(items) == 1
+        assert items[0].quantity == 3
+
+    def test_multiple_price_first_items(self):
+        items = parse_items(_lines(
+            "17.15   V",
+            "1  ×  17.15",
+            "4000092552373   CA05SINI   BVANCA4JG",
+            "122.00   V",
+            "1   x   122.00",
+            "4800016652035   JNJ   MRCHPSN / CHS24G",
+            "Subtotal 139.15",
+        ))
+        assert len(items) == 2
+        assert "CA05SINI BVANCA4JG" in items[0].full_name
+        assert "JNJ MRCHPSN / CHS24G" in items[1].full_name
+
+    def test_plain_money_line_without_name_stays_pending_until_summary(self):
+        # No name line follows: the row is still emitted rather than dropped.
+        items = parse_items(_lines(
+            "64.00   V",
+            "1  ×  64.00",
+            "Subtotal 64.00",
+        ))
+        assert len(items) == 1
+        assert items[0].price == 64.00
+
+
+class TestLooksLikeStoreCode:
+    def test_code_style_names_are_detected(self):
+        assert looks_like_store_code("DRD PEV-CUT EP025G")
+        assert looks_like_store_code("CA05SINI BVANCA4JG")
+        assert looks_like_store_code("Z0NA04 CA15 500ML")
+
+    def test_product_names_are_not_codes(self):
+        assert not looks_like_store_code("SALAD")
+        assert not looks_like_store_code("Chickenjoy bucket")
+        assert not looks_like_store_code("SMART DW P-LEMON")

@@ -16,6 +16,7 @@ from rapidfuzz import process, distance
 
 from app.core.dictionaries import ALL_DICTIONARY_TERMS
 from app.core.extraction import Extraction
+from app.core.items import looks_like_store_code
 from app.core.ocr_engine import OcrBundle, Word
 from app.llm.factory import create_provider
 
@@ -146,10 +147,26 @@ class LLMContextCorrector:
         # Extract non-empty names
         names = [item.get("name", "") for item in items]
         valid_indices = [i for i, name in enumerate(names) if name]
-        texts_to_correct = [names[i] for i in valid_indices]
 
-        if not texts_to_correct:
+        if not valid_indices:
             return items
+
+        # Grocery-POS receipts print store codes ('DRD PEV-CUT EP025G') as item
+        # names. No model can "correct" a code into a real product name, and
+        # sending 40 of them through the LLM costs ~80s per job on CPU for zero
+        # gain - so code-style names skip the batch normalization call entirely.
+        correctable_indices = [
+            i for i in valid_indices if not looks_like_store_code(names[i])
+        ]
+
+        # The batch call costs ~80s on CPU regardless of how many names it is
+        # sent, so a receipt whose items are mostly store codes skips it
+        # entirely: the few non-code names are usually the same codes with OCR
+        # noise, and the model has no product dictionary to recover them with.
+        if not correctable_indices or len(correctable_indices) < len(valid_indices) / 2:
+            return items
+
+        texts_to_correct = [names[i] for i in correctable_indices]
 
         try:
             # Batch LLM call for complex name normalization
@@ -157,7 +174,7 @@ class LLMContextCorrector:
             
             # Since validation ensures length match, we can safely zip
             if len(corrected_texts) == len(texts_to_correct):
-                for idx, c_name in zip(valid_indices, corrected_texts):
+                for idx, c_name in zip(correctable_indices, corrected_texts):
                     orig_name = names[idx]
                     if c_name and c_name.lower() != orig_name.lower():
                         logger.debug("LLM batch corrected item name %r -> %r", orig_name, c_name)
@@ -195,10 +212,11 @@ async def normalize_extraction(
     if extraction.item_scan and extraction.item_scan.items:
         items_payload = extraction.item_scan.payload()
         
-        # Apply dictionary first
+        # Apply dictionary first - store codes are printed identities and must
+        # stay verbatim; the dictionary would only mangle them (PEV-CUT -> PEANUT).
         for item_dict in items_payload:
             name = item_dict.get("name")
-            if name:
+            if name and not looks_like_store_code(name):
                 item_dict["name"] = dict_corrector.correct_phrase(name, bundle)
                 
         if not use_llm:

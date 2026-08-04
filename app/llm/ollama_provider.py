@@ -244,7 +244,7 @@ class OllamaProvider(LLMProvider):
             ocr_text=ocr_text[:12000],
         )
         return await self._generate(
-            prompt, token_limit=SELECTION_TOKEN_LIMIT + 128, timeout=90.0
+            prompt, token_limit=SELECTION_TOKEN_LIMIT + 128, timeout=150.0
         )
 
     async def normalize_batch_texts(self, texts: list[str], context: str) -> list[str]:

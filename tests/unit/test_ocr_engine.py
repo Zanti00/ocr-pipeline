@@ -327,3 +327,33 @@ async def test_read_pooled_resolves_psms_from_settings(monkeypatch):
     await ocr_engine.read_pooled(object(), pool_size=2, fast_path=False)
 
     assert captured["psms"] == (6, 11)
+
+
+def test_supporting_readings_drop_far_weaker_candidates():
+    # Tall/narrow receipts: Paddle reads cleanly while Tesseract degrades to
+    # near-zero scores. That garbage must not reach combined_text, which feeds
+    # the LLM prompt and the item scanners.
+    from app.core.ocr_engine import _supporting_readings
+
+    primary = reading(
+        "Paddle total 10.00", 4.46, 0.95,
+        engine="paddle", variant="source", psm=0,
+    )
+    close = reading("Close runner total 10.00", 4.20, 0.90, variant="flat")
+    garbage = reading("garbage !!! x", 0.36, 0.30, variant="raw")
+
+    supporting = _supporting_readings([primary, close, garbage], primary, pool_size=3)
+
+    assert supporting == [close]
+    assert all(r.score >= primary.score / 2.0 for r in supporting)
+
+
+def test_supporting_readings_keep_strong_runner_ups():
+    from app.core.ocr_engine import _supporting_readings
+
+    primary = reading("Paddle total 10.00", 4.0, 0.95, engine="paddle", variant="source", psm=0)
+    runner = reading("Runner total 10.00", 3.6, 0.90, variant="flat")
+
+    supporting = _supporting_readings([primary, runner], primary, pool_size=2)
+
+    assert supporting == [runner]

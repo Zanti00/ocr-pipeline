@@ -188,6 +188,18 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
     items: list[ExtractedItem] = []
     started = not require_marker
     seen_item = False
+    # A money line whose remainder is not a plausible name (grocery-POS layout:
+    # '64.00 V' / '1 × 64.00' / '4800016522533 DRD PEV-CUT EP025G'). The item is
+    # held until the following lines supply the name, instead of emitting rows
+    # named 'V' and treating the barcode line as a description.
+    pending: ExtractedItem | None = None
+
+    def _flush_pending() -> None:
+        nonlocal pending, seen_item
+        if pending is not None:
+            items.append(pending)
+            seen_item = True
+            pending = None
 
     for line in lines:
         text = " ".join(word.text for word in line).strip()
@@ -196,6 +208,7 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
 
         label = _best_label(text)
         if label and label[0] in SUMMARY_FIELDS:
+            _flush_pending()
             if seen_item:
                 break  # the first summary line after the items ends the region
             # A summary label before any item does NOT open the region. Treating it
@@ -218,20 +231,56 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
             remainder = " ".join(
                 word.text for word in line if id(word) not in token_word_ids
             )
+            if pending is not None and _is_quantity_line(remainder):
+                # '1 × 64.00' repeats the pending item's price with its quantity.
+                # Merge rather than emit a duplicate row.
+                quantity = _quantity_of(remainder)
+                if quantity is not None:
+                    pending.quantity = quantity
+                continue
+            _flush_pending()
             item = _build_item(remainder, money[-1], line_text=text)
             if item is not None:
-                items.append(item)
-                seen_item = True
+                if looks_like_item_name(item.name):
+                    items.append(item)
+                    seen_item = True
+                else:
+                    pending = item
             continue
 
-        # No money on this line: a description of the item above it.
+        # No money on this line: a description of the item above it - unless a
+        # pending item is waiting for its name, which this line supplies.
+        if pending is not None:
+            name = _clean_name(text)
+            if name:
+                pending.name = name
+            _flush_pending()
+            continue
+
         if items and _plausible_description(text):
             items[-1].descriptions.append(text)
 
         if len(items) >= MAX_ITEMS:
             break
 
+    _flush_pending()
     return items
+
+
+_QUANTITY_MARKER_RE = re.compile(r"^\s*[0-9Il]{1,3}\s*[xX×]\s*$")
+_QUANTITY_DIGITS_RE = re.compile(r"^\s*(\d{1,3})\s*[xX×]\s*$")
+
+
+def _is_quantity_line(remainder: str) -> bool:
+    """Is this money-line remainder a bare '1 ×' quantity marker?"""
+    return bool(_QUANTITY_MARKER_RE.match(remainder))
+
+
+def _quantity_of(remainder: str) -> int | None:
+    match = _QUANTITY_DIGITS_RE.match(remainder)
+    if match:
+        return max(1, int(match.group(1)))
+    return 1
 
 
 def _build_item(
@@ -313,6 +362,26 @@ def looks_like_item_name(text: str) -> bool:
 def _plausible_description(text: str) -> bool:
     letters = sum(1 for ch in text if ch.isalpha())
     return letters >= 3 and letters >= len(text) * 0.4
+
+
+def looks_like_store_code(name: str) -> bool:
+    """Is this item name a grocery-POS store code rather than a product name?
+
+    Codes like 'DRD PEV-CUT EP025G' or 'JNJ MRCHPSN / CHS24G' are the printed
+    identity of a shelf item: uppercase fragments mixed with digits, dashes and
+    slashes. They cannot be "corrected" into a real product name by any model,
+    so they are excluded from LLM batch normalization - the call would cost
+    ~80s on CPU per job and can only mangle them further.
+    """
+    if not name or not name.isupper():
+        return False
+    # A mixed alphanumeric token (EP025G, CHS24G, PUF69G, 5300G) marks the
+    # store-code style. Real product names rarely carry such tokens; even where
+    # they do ('CHICKEN 3PCS'), the LLM cannot improve on what was printed.
+    return any(
+        re.search(r"[A-Z0-9]*\d[A-Z0-9]*[A-Z][A-Z0-9]*", token)
+        for token in name.split()
+    )
 
 
 def reconcile_items(

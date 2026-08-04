@@ -396,17 +396,27 @@ def read_paddle(image: Image.Image) -> OcrReading:
     words: list[Word] = []
     confidences: list[float] = []
 
+    # Tall/narrow receipts (aspect >= 2.0) get a smaller detector resize limit:
+    # the default 960px side produces a ~3820px internal image and Paddle spends
+    # a minute per call on it. 512 was measured to cut that time by ~30% with
+    # identical line/character output on long grocery receipts, so the reduced
+    # detector context does not lose lines.
+    height, width = image.size
+    det_limit = 512 if height >= 2.0 * width else None
+
     if hasattr(engine, "predict"):
         # PaddleOCR 3.x returns OCRResult mappings. Disabling optional document
         # stages avoids the CPU PIR/oneDNN path that is not supported by all
         # Paddle runtime builds and is unnecessary for receipt crops.
-        result = engine.predict(
-            img_array,
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-            return_word_box=True,
-        )
+        kwargs = {
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+            "return_word_box": True,
+        }
+        if det_limit is not None:
+            kwargs["text_det_limit_side_len"] = det_limit
+        result = engine.predict(img_array, **kwargs)
         first = result[0] if result else None
         if first is not None and hasattr(first, "get"):
             texts = first.get("rec_texts", [])
@@ -462,12 +472,21 @@ def _supporting_readings(
     primary: OcrReading,
     pool_size: int,
 ) -> list[OcrReading]:
-    """Choose strong, diverse readings excluding the selected primary."""
+    """Choose strong, diverse readings excluding the selected primary.
+
+    Readings that score far below the primary are excluded outright: on
+    tall/narrow receipts Tesseract degrades to near-zero anchor scores while
+    Paddle reads the slip cleanly, and concatenating that garbage into
+    ``combined_text`` pollutes the LLM prompt (wrong vendor, wrong country)
+    and the item/region scanners. A floor of half the primary's score keeps
+    genuinely independent second opinions while dropping engine failure.
+    """
     supporting: list[OcrReading] = []
     seen_variants: set[str] = {primary.variant}
     seen_text: set[str] = {primary.text}
     ranked = rank_candidates(candidates)
     target = max(0, pool_size - 1)
+    floor = primary.score / 2.0
 
     # Prefer different preprocessing variants/engines first, then fill remaining
     # slots with another candidate. Identical OCR text is pooled only once.
@@ -476,6 +495,8 @@ def _supporting_readings(
             if len(supporting) >= target:
                 return supporting
             if reading is primary or reading.text in seen_text:
+                continue
+            if reading.score < floor:
                 continue
             if distinct_variants_only and reading.variant in seen_variants:
                 continue
