@@ -4,12 +4,6 @@ from typing import Any
 
 import httpx
 
-import json
-import logging
-from typing import Any
-
-import httpx
-
 from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.prompts import (
@@ -35,6 +29,26 @@ logger = logging.getLogger(__name__)
 SELECTION_TOKEN_LIMIT = 64
 EXTRACTION_TOKEN_LIMIT = 768
 
+# The model only answers value-suffice questions: vendor/location names sit in the
+# receipt header, totals and tax wording in the footer. Feeding a long run-on body
+# just taxes CPU prefill and stalls. Bound context to the header + a fixed tail so
+# the model sees the relevant regions without the full itemized middle.
+CONTEXT_HEAD_CHARS = 3500
+CONTEXT_TAIL_CHARS = 2500
+
+
+def _bound_context(ocr_text: str) -> str:
+    """Keep the receipt header and the totals region, drop the long middle body."""
+    if not ocr_text:
+        return ocr_text
+    if len(ocr_text) <= CONTEXT_HEAD_CHARS + CONTEXT_TAIL_CHARS:
+        return ocr_text
+    return (
+        ocr_text[:CONTEXT_HEAD_CHARS]
+        + "\n[... truncated middle ...]\n"
+        + ocr_text[-CONTEXT_TAIL_CHARS:]
+    )
+
 
 class OllamaProvider(LLMProvider):
     def __init__(self) -> None:
@@ -55,10 +69,12 @@ class OllamaProvider(LLMProvider):
             "prompt": prompt,
             "stream": False,
             "format": "json",
+            "keep_alive": settings.ollama_keep_alive,
             "options": {
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "num_predict": token_limit,
+                "num_ctx": settings.ollama_num_ctx,
             },
         }
 
@@ -99,7 +115,7 @@ class OllamaProvider(LLMProvider):
 
     async def extract_receipt_fields(self, ocr_text: str) -> dict:
         result = await self._generate(
-            RECEIPT_EXTRACTION_PROMPT.format(ocr_text=ocr_text),
+            RECEIPT_EXTRACTION_PROMPT.format(ocr_text=_bound_context(ocr_text)),
             token_limit=EXTRACTION_TOKEN_LIMIT,
         )
         if result is None:
@@ -164,7 +180,7 @@ class OllamaProvider(LLMProvider):
         if not ocr_text.strip():
             return None
         return await self._generate(
-            FINANCIAL_SEMANTICS_PROMPT.format(ocr_text=ocr_text[:12000]),
+            FINANCIAL_SEMANTICS_PROMPT.format(ocr_text=_bound_context(ocr_text)),
             token_limit=SELECTION_TOKEN_LIMIT,
             timeout=60.0,
         )
@@ -174,7 +190,7 @@ class OllamaProvider(LLMProvider):
             return None
         from app.llm.prompts import SUBTOTAL_VERIFICATION_PROMPT
         result = await self._generate(
-            SUBTOTAL_VERIFICATION_PROMPT.format(ocr_text=ocr_text[:12000]),
+            SUBTOTAL_VERIFICATION_PROMPT.format(ocr_text=_bound_context(ocr_text)),
             token_limit=SELECTION_TOKEN_LIMIT,
             timeout=60.0,
         )
@@ -241,7 +257,7 @@ class OllamaProvider(LLMProvider):
         prompt = ASSISTS_PROMPT.format(
             questions="\n\n".join(questions),
             shape=",\n".join(shape),
-            ocr_text=ocr_text[:12000],
+            ocr_text=_bound_context(ocr_text),
         )
         return await self._generate(
             prompt, token_limit=SELECTION_TOKEN_LIMIT + 128, timeout=150.0

@@ -23,6 +23,13 @@ from app.llm.factory import create_provider
 logger = logging.getLogger(__name__)
 
 
+# The LLM batch-normalization call is fixed-cost (~20-80s on CPU) no matter how
+# many names it is handed, so it is only worth paying when there is a meaningful
+# batch of genuine product names to fix. Fewer than this many correctable names
+# (e.g. most restaurant receipts) returns early instead of spending the call.
+MIN_CORRECTABLE_NAMES = 3
+
+
 @dataclass
 class NormalizationResult:
     original: str
@@ -159,11 +166,23 @@ class LLMContextCorrector:
             i for i in valid_indices if not looks_like_store_code(names[i])
         ]
 
-        # The batch call costs ~80s on CPU regardless of how many names it is
+        # The batch call costs ~20-80s on CPU regardless of how many names it is
         # sent, so a receipt whose items are mostly store codes skips it
         # entirely: the few non-code names are usually the same codes with OCR
         # noise, and the model has no product dictionary to recover them with.
         if not correctable_indices or len(correctable_indices) < len(valid_indices) / 2:
+            return items
+
+        # Fixed-cost LLM call: it pays the same ~20-80s whether it is asked to
+        # fix one name or forty. A single or pair of genuine names (e.g. most
+        # restaurant receipts) is never worth that, and the model has no product
+        # dictionary to improve on an already-printed name - so require a
+        # meaningful batch before spending the CPU.
+        if len(correctable_indices) < MIN_CORRECTABLE_NAMES:
+            logger.debug(
+                "Skipping LLM batch normalization: %d correctable names "
+                "below minimum %d", len(correctable_indices), MIN_CORRECTABLE_NAMES,
+            )
             return items
 
         texts_to_correct = [names[i] for i in correctable_indices]

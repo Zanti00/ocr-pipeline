@@ -124,3 +124,20 @@ async def test_ollama_verify_subtotal_is_fail_soft(monkeypatch):
         return None
     monkeypatch.setattr(provider, "_generate", failed)
     assert await provider.verify_subtotal("Subtotal: 12.34") is None
+
+
+def test_bound_context_short_text_unchanged():
+    from app.llm.ollama_provider import _bound_context, CONTEXT_HEAD_CHARS, CONTEXT_TAIL_CHARS
+    short = "Vendor\nTotal 123.45"
+    assert _bound_context(short) == short
+
+
+def test_bound_context_keeps_header_and_tail():
+    from app.llm.ollama_provider import _bound_context, CONTEXT_HEAD_CHARS
+    body = "line\n" * 3000
+    text = "VENDOR HEADER %s FOOTER 99.95" % body
+    bounded = _bound_context(text)
+    assert "VENDOR HEADER" in bounded
+    assert "FOOTER 99.95" in bounded
+    assert len(bounded) < len(text)
+    assert _bound_context("") == ""

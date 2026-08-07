@@ -62,10 +62,14 @@ async def test_llm_corrector_mocked(monkeypatch):
     monkeypatch.setattr(app.core.postprocessing, "create_provider", lambda: MockProvider())
     
     corrector = LLMContextCorrector()
-    items = [{"name": "Res Coffee", "quantity": 1, "price": 2.50}]
+    items = [
+        {"name": "Res Coffee", "quantity": 1, "price": 2.50},
+        {"name": "Bottled Water", "quantity": 1, "price": 1.00},
+        {"name": "Fresh Fries", "quantity": 1, "price": 1.50},
+    ]
     corrected = await corrector.correct_line_items(items, "Res Coffee 2.50")
     
-    assert len(corrected) == 1
+    assert len(corrected) == 3
     assert corrected[0]["name"] == "Red Coffee"
 
 @pytest.mark.asyncio
@@ -91,7 +95,11 @@ async def test_normalize_extraction_item_mutation(mock_bundle, monkeypatch):
     # Create an Extraction object with real ExtractedItem objects
     item = ExtractedItem(name="Res Coffee", quantity=1, price=2.50)
     item.descriptions.append("Extra shot") # Descriptions should be cleared
-    scan = ItemScan(items=[item])
+    item2 = ExtractedItem(name="Bottled Water", quantity=1, price=1.00)
+    item2.descriptions.append("Cold")
+    item3 = ExtractedItem(name="Fresh Fries", quantity=1, price=1.50)
+    item3.descriptions.append("Large")
+    scan = ItemScan(items=[item, item2, item3])
     
     extraction = Extraction()
     extraction.item_scan = scan
@@ -245,7 +253,34 @@ async def test_llm_corrector_still_corrects_word_names(monkeypatch):
     items = [
         {"name": "Res Coffee", "quantity": 1, "price": 2.50},
         {"name": "Bottled Water", "quantity": 1, "price": 1.00},
+        {"name": "Fresh Fries", "quantity": 1, "price": 1.50},
     ]
     corrected = await corrector.correct_line_items(items, "Res Coffee 2.50")
 
     assert corrected[0]["name"] == "Res Coffee"
+
+
+@pytest.mark.asyncio
+async def test_llm_corrector_skips_tiny_genuine_batches(monkeypatch):
+    """Few genuine names must not pay the fixed-cost LLM batch call."""
+    import app.core.postprocessing
+
+    called = {"batch": False}
+
+    class TinyBatchProvider:
+        async def normalize_batch_texts(self, texts, context):
+            called["batch"] = True
+            return texts
+
+    monkeypatch.setattr(app.core.postprocessing, "create_provider",
+                        lambda: TinyBatchProvider())
+
+    corrector = LLMContextCorrector()
+    items = [
+        {"name": "Res Coffee", "quantity": 1, "price": 2.50},
+        {"name": "Bottled Water", "quantity": 1, "price": 1.00},
+    ]
+    corrected = await corrector.correct_line_items(items, "Res Coffee 2.50")
+
+    assert called["batch"] is False
+    assert corrected == items

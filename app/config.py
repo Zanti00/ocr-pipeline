@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     ollama_base_url: str
     ollama_model: str
     llm_provider: str = "ollama"
+    # How long the model stays resident in memory after a call. Ollama's server
+    # default is 5 minutes; a longer value avoids a cold reload (full prefill)
+    # between calls, which on CPU is the dominant latency.
+    ollama_keep_alive: str = "10m"
+    # Explicit context window. Fixed num_ctx prevents the server from resizing
+    # (and re-prefilling) the KV cache when a prompt grows past the default.
+    ollama_num_ctx: int = 8192
 
     # Databases
     redis_url: str
