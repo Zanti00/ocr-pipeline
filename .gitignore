@@ -10,7 +10,8 @@ __pycache__/
 .pytest_cache/
 
 # Project Documentation
-/docs/
+/docs/deliverables
+/docs/generator
 
 # evaluation harness output
 .eval_out/
