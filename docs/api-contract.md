@@ -1,10 +1,34 @@
 # API Contract
 
 ## Authentication
-All endpoints (except health) require a Bearer token matching the respective consumer's API key.
+All endpoints (except health and root) require a Bearer token matching the respective consumer's API key.
 ```
 Authorization: Bearer <API_KEY>
 ```
+Missing or invalid API keys return `403 Forbidden` (`Forbidden: Missing or invalid API key.`).
+
+## Rate Limiting
+All HTTP responses carry standard rate-limiting headers:
+- `X-RateLimit-Limit`: Maximum requests permitted within the current window.
+- `X-RateLimit-Remaining`: Requests remaining in the current window.
+- `X-RateLimit-Reset`: Seconds remaining until the window resets.
+
+When limits are exceeded, the API returns **`429 Too Many Requests`** along with a `Retry-After: <seconds>` header:
+```json
+{
+  "detail": "Rate limit exceeded. Try again in 42 seconds.",
+  "error_code": "rate_limit_exceeded",
+  "retry_after": 42
+}
+```
+
+| Route Group | Scope | Default Quota |
+|---|---|---|
+| `POST /api/ocr/process` | Authenticated Service (`serms`/`prs`) | 30 requests / minute |
+| `POST /api/duplicate-check` | Authenticated Service (`serms`/`prs`) | 60 requests / minute |
+| `GET /api/jobs/*`, `GET /api/metrics` | Authenticated Service (`serms`/`prs`) | 120 requests / minute |
+| `GET /api/health`, `GET /` | Client IP | 60 requests / minute |
+| Unauthenticated / Failed Auth Attempts | Client IP | 15 attempts / minute |
 
 ## Endpoints
 

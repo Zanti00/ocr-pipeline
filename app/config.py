@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     image_quality_min_height: int = 400
     image_quality_max_segments: int = 4
 
+    # Rate limiting config
+    rate_limit_enabled: bool = True
+    rate_limit_window_seconds: int = 60
+    rate_limit_ocr_per_minute: int = 30
+    rate_limit_duplicate_per_minute: int = 60
+    rate_limit_read_per_minute: int = 120
+    rate_limit_health_per_minute: int = 60
+    rate_limit_auth_fail_per_minute: int = 15
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
