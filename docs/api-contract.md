@@ -76,7 +76,7 @@ modal. A MongoDB audit row is still written with `status: "rejected"`.
 }
 ```
 
-`rejection_code` values: `too_small` | `blurry` | `too_dark` | `quality_failed`.
+`rejection_code` values: `too_small` | `blurry` | `too_dark` | `not_a_receipt` | `quality_failed`.
 
 To bypass the gate (e.g. user confirms a retake is impossible), resubmit with
 `"force_process": true`.

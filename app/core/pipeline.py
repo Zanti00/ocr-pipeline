@@ -32,6 +32,7 @@ from app.core.extraction import Extraction, extract, fast_path_sufficient
 from app.core.ocr_engine import OcrBundle, rank_candidates, read_pooled
 from app.core.pdf_handler import pdf_to_images
 from app.core.image_stitcher import stitch_segments
+from app.core.image_quality import NOT_A_RECEIPT_REASON
 from app.core.verification import Verification, verify
 from app.api.schemas.ocr import build_callback_payload
 from app.core.financial_semantics import (
@@ -43,7 +44,6 @@ from app.db.mongodb import MongoDBClient
 from app.db.postgres import AsyncSessionLocal
 from app.embeddings.generator import EmbeddingGenerator
 from app.embeddings.similarity import find_similar_receipts
-from app.core.ocr_engine import rank_candidates
 from app.llm.factory import create_provider
 from app.core.postprocessing import normalize_extraction
 
@@ -64,6 +64,22 @@ def load_images(file_bytes: bytes, file_url: str) -> list[Image.Image]:
     if file_url.lower().split("?")[0].endswith(".pdf"):
         return pdf_to_images(file_bytes)[:MAX_PDF_PAGES]
     return [Image.open(BytesIO(file_bytes))]
+
+
+def is_likely_receipt(bundle: OcrBundle, extraction: Extraction) -> bool:
+    """Evaluate whether the OCR output exhibits signals of a genuine receipt."""
+    anchors = bundle.primary.anchors
+    has_money = bool((anchors and anchors.money_tokens > 0) or extraction.fields.get("total_amount") is not None)
+    has_keywords = bool(anchors and anchors.keyword_hits > 0)
+    has_tax_id = bool((anchors and anchors.has_tax_id) or extraction.fields.get("vendor_tax_id") is not None)
+    has_date = bool((anchors and anchors.has_date) or extraction.fields.get("transaction_date") is not None)
+
+    # If it has money, receipt keywords, or a tax id, it qualifies as a receipt
+    if has_money or has_keywords or has_tax_id:
+        return True
+
+    # If it has a date AND a vendor name with at least some words, it might be a simple slip
+    return bool(has_date and extraction.fields.get("vendor_name"))
 
 
 async def process_receipt(
@@ -106,6 +122,32 @@ async def process_receipt(
             images, caller_country=country, caller_currency=currency, caller_location=location
         )
         t_ocr_total = time.perf_counter() - t0_ocr
+
+        if not force_process and not is_likely_receipt(bundle, extraction):
+            logger.warning(
+                "Job %s rejected: OCR output lacks receipt signals (money, keywords, tax id)",
+                job_id,
+            )
+            await MongoDBClient.update_job_status(
+                job_id,
+                "rejected",
+                {
+                    "status": "rejected",
+                    "rejection_code": "not_a_receipt",
+                    "rejection_reason": NOT_A_RECEIPT_REASON,
+                    "error": NOT_A_RECEIPT_REASON,
+                },
+            )
+            payload = build_callback_payload(
+                receipt_id=receipt_id,
+                fields=dict(extraction.fields),
+                confidence=0.0,
+                status="rejected",
+                rejection_code="not_a_receipt",
+                rejection_reason=NOT_A_RECEIPT_REASON,
+            )
+            await send_callback(callback_url, payload.model_dump())
+            return
 
         verification = verify(
             extraction.as_dict(),
