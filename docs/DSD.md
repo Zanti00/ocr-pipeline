@@ -99,6 +99,13 @@ Redis is utilized as Celery's message broker and as a light caching layer for qu
   - **Value:** `job_id` (string)
   - **TTL:** 90 Days
   - **Purpose:** If a matching file hash is submitted, bypass background worker OCR execution entirely and reuse the existing job metadata.
+- **API Rate Limiting:**
+  - **Key Structure:**
+    - Authenticated: `ocr:ratelimit:svc:<source_service>:<route_group>` (`ocr`, `duplicate`, `read`)
+    - Unauthenticated / Auth Failures: `ocr:ratelimit:ip:<client_ip>:auth_fail`
+    - Public / Health: `ocr:ratelimit:ip:<client_ip>:health`
+  - **TTL:** 60 seconds (window duration)
+  - **Backend:** Atomic Redis Lua counter with automatic fallback to in-memory fixed-window counter if Redis is unreachable.
 
 ---
 

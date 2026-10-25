@@ -100,9 +100,10 @@
 | ID | Attack | Trigger | Expected Defense |
 |----|---|---|---|
 | AB-01 | Unauthenticated job submission | `POST /api/ocr/process` with no API key | `403 Forbidden` — `verify_api_key` dependency blocks request |
-| AB-02 | API key enumeration | Submit requests with guessed keys | Key comparison is constant-time (verify implementation) |
+| AB-02 | API key enumeration / brute force | Submit requests with guessed keys | Constant-time `secrets.compare_digest` check; requests exceeding `rate_limit_auth_fail_per_minute` (15/min) are blocked with `429 Too Many Requests` |
 | AB-03 | Oversized payload / file | Submit a very large `file_url` pointing to a huge file | `httpx` 30s timeout; pipeline fails safely and retries |
 | AB-04 | Secret leakage in logs | Inspect application log output | API keys, raw PII, and `.env` values must not appear in logs |
+| AB-05 | Endpoint flooding / DoS | Exceed per-minute rate limit on any endpoint | Returns `429 Too Many Requests` with `Retry-After` header and `ocr:ratelimit:*` tracking |
 
 ---
 

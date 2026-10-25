@@ -98,6 +98,13 @@ The microservice is configured using environment variables loaded at runtime via
 | `OMP_NUM_THREADS` / `OMP_THREAD_LIMIT` | integer | `1` | Container-level OpenMP caps. **Required for the worker**: Tesseract subprocesses otherwise spawn a full OpenMP team (8 threads) each, and 6 concurrent pool passes thrash the CPU - measured 26x SLOWER than sequential (258-309s vs 12s for the same 15-pass grid). With OMP capped to 1, the grid runs in ~4s with identical readings. |
 | `OLLAMA_KEEP_ALIVE` | string | `10m` | How long the Ollama model stays resident after a call. A longer value avoids a cold reload (full prefill) between calls, which on CPU-only inference is the dominant latency. |
 | `OLLAMA_NUM_CTX` | integer | `8192` | Explicit context window sent with each generation request. A fixed value prevents the server from resizing (and re-prefilling) the KV cache when the prompt grows past the default. |
+| `RATE_LIMIT_ENABLED` | boolean | `true` | Enable/disable API rate limiting middleware. |
+| `RATE_LIMIT_WINDOW_SECONDS` | integer | `60` | Duration of the sliding fixed-window bucket in seconds. |
+| `RATE_LIMIT_OCR_PER_MINUTE` | integer | `30` | Per-service limit for `POST /api/ocr/process`. |
+| `RATE_LIMIT_DUPLICATE_PER_MINUTE` | integer | `60` | Per-service limit for `POST /api/duplicate-check`. |
+| `RATE_LIMIT_READ_PER_MINUTE` | integer | `120` | Per-service limit for `/api/jobs/*` and `/api/metrics`. |
+| `RATE_LIMIT_HEALTH_PER_MINUTE` | integer | `60` | Per-IP limit for `/api/health` and `/`. |
+| `RATE_LIMIT_AUTH_FAIL_PER_MINUTE` | integer | `15` | Per-IP limit for failed/unauthenticated attempts on protected endpoints before HTTP 429. |
 
 Colocated with the warm-model settings, the provider bounds what it feeds the model: only the receipt header (~3500 chars) plus a fixed totals tail (~2500 chars) are sent for selection/semantics/subtotal calls (`_bound_context`), dropping the long itemized middle that would otherwise tax CPU prefill with noise. Vendor/location names live in the header and totals/tax wording in the footer, so bounding preserves the regions the model actually answers from.
 

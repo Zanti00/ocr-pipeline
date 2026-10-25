@@ -150,6 +150,12 @@ Full schema: [`docs/DSD.md`](DSD.md).
 | `EMBEDDING_MODEL`                  | `all-MiniLM-L6-v2`          | Embedding model id                         |
 | `DUPLICATE_SIMILARITY_THRESHOLD`   | `0.85`                      | Cosine similarity cutoff                   |
 | `DUPLICATE_DAYS_WINDOW`            | `90`                        | Lookback window (days)                     |
+| `RATE_LIMIT_ENABLED`               | `true`                      | Enable/disable API rate limiting           |
+| `RATE_LIMIT_OCR_PER_MINUTE`        | `30`                        | Rate limit for `POST /api/ocr/process`     |
+| `RATE_LIMIT_DUPLICATE_PER_MINUTE`  | `60`                        | Rate limit for `POST /api/duplicate-check` |
+| `RATE_LIMIT_READ_PER_MINUTE`       | `120`                       | Rate limit for `/api/jobs/*` & `/metrics`  |
+| `RATE_LIMIT_HEALTH_PER_MINUTE`     | `60`                        | Rate limit for `/api/health` & `/`         |
+| `RATE_LIMIT_AUTH_FAIL_PER_MINUTE`  | `15`                        | Brute-force limit for failed auth attempts |
 
 Full reference: [`docs/SDD.md § 3`](SDD.md).
 
