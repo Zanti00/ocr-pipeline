@@ -140,3 +140,52 @@ class TestQualityRejection:
         assert payload.error == "Image is too blurry for accurate OCR. Please retake the photo with better focus and steady lighting."
         assert payload.rejection_reason == payload.error
 
+    def test_not_a_receipt_rejection_payload(self):
+        from app.core.image_quality import NOT_A_RECEIPT_REASON
+        payload = build_callback_payload(
+            receipt_id=42,
+            status="rejected",
+            error=NOT_A_RECEIPT_REASON,
+            rejection_code="not_a_receipt",
+            rejection_reason=NOT_A_RECEIPT_REASON,
+        )
+        assert payload.receipt_id == 42
+        assert payload.status == "rejected"
+        assert payload.rejection_code == "not_a_receipt"
+        assert "does not appear to be a receipt" in payload.rejection_reason
+
+    def test_is_likely_receipt_logic(self):
+        from app.core.anchors import AnchorScore
+        from app.core.extraction import Extraction
+        from app.core.ocr_engine import OcrBundle, OcrReading
+        from app.core.pipeline import is_likely_receipt
+
+        reading = OcrReading(
+            text="Hello world this is a random portrait caption without prices",
+            words=[],
+            confidence=0.9,
+            variant="raw",
+            psm=6,
+            anchors=AnchorScore(total=0.0, money_tokens=0, keyword_hits=0, has_tax_id=False, has_date=False),
+        )
+        bundle = OcrBundle(primary=reading, supporting=[], all_readings=[reading])
+        extraction = Extraction(fields={"vendor_name": None, "total_amount": None, "vendor_tax_id": None})
+        assert is_likely_receipt(bundle, extraction) is False
+
+        # With total amount
+        extraction_with_total = Extraction(fields={"total_amount": 125.50})
+        assert is_likely_receipt(bundle, extraction_with_total) is True
+
+        # With keyword hits
+        reading_receipt = OcrReading(
+            text="Official Receipt Total Amount",
+            words=[],
+            confidence=0.9,
+            variant="raw",
+            psm=6,
+            anchors=AnchorScore(total=1.0, money_tokens=0, keyword_hits=2, has_tax_id=False, has_date=False),
+        )
+        bundle_receipt = OcrBundle(primary=reading_receipt, supporting=[], all_readings=[reading_receipt])
+        assert is_likely_receipt(bundle_receipt, extraction) is True
+
+

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -68,6 +69,22 @@ def test_blurry_image_rejected():
     result = check_image_quality(img)
     assert result.passed is False
     assert result.rejection_code == "blurry"
+    assert "too blurry to read the receipt details accurately" in result.rejection_reason
+
+
+def test_colorful_non_document_rejected_as_not_a_receipt():
+    # Sharp, bright, colorful photo (e.g., sky and grass scene with sharp horizon and sun)
+    # but zero horizontal text line structures
+    arr = np.zeros((600, 400, 3), dtype=np.uint8)
+    arr[:300, :, :] = [100, 180, 240]  # Sky
+    arr[300:, :, :] = [30, 160, 40]    # Grass
+    cv2.line(arr, (0, 300), (400, 300), (0, 0, 0), 5)
+    cv2.circle(arr, (200, 150), 50, (255, 255, 0), -1)
+    img = Image.fromarray(arr, mode="RGB")
+    result = check_image_quality(img)
+    assert result.passed is False
+    assert result.rejection_code == "not_a_receipt"
+    assert "does not appear to be a receipt" in result.rejection_reason
 
 
 def test_receipt_11_passes_quality_gate():
@@ -76,3 +93,13 @@ def test_receipt_11_passes_quality_gate():
         return
     result = check_image_quality(Image.open(path))
     assert result.passed is True, result.rejection_reason
+
+
+def test_receipt_15_orange_table_passes_quality_gate():
+    path = RECEIPTS_DIR / "receipt 15.jpeg"
+    if not path.exists():
+        return
+    result = check_image_quality(Image.open(path))
+    assert result.passed is True, result.rejection_reason
+
+
