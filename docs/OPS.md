@@ -17,9 +17,10 @@
 | SLI (what you measure) | SLO (target) | Measured by | Breach action |
 |---|---|---|---|
 | API Availability (`/api/health`) | ≥ 99% uptime | Manual spot-checks (no formal uptime monitor yet) | Inspect container logs; restart failing service |
-| OCR Job Processing Time | 95% of jobs complete in ≤ 10s | MongoDB `jobs` collection timestamps | Investigate Ollama latency or queue depth |
-| OCR Job Processing Time (offline target) | Average receipt < 60 s on clean receipts; hard receipts may exceed | `scripts/benchmark.py` per-stage timing | Profile engine pool size; review fast-path escalation ratio |
-| OCR Pool Throughput (worker) | Escalated pool ≤ 60s per hard receipt | `scripts/benchmark.py`; worker env must set `OMP_NUM_THREADS=1`/`OMP_THREAD_LIMIT=1` | Without the OMP caps, concurrent Tesseract subprocesses thrash the CPU — measured 258-309s for a grid that runs in ~4s capped (26x penalty). Post-fix benchmark: fast-path avg 1.4s, pooled avg 13.7s, max 22.6s across the 14-receipt corpus |
+| OCR Job Processing Time (p95) | ≤ 30s across all receipt types | MongoDB `jobs` collection timestamps | Investigate Ollama latency, detector limits, or queue depth |
+| OCR Job Processing Time (fast path) | Clean receipts complete in ~1.5s | MongoDB `jobs` collection timestamps | Review fast-path anchor scoring threshold (`FAST_PATH_ANCHOR_SCORE`) |
+| OCR Job Processing Time (cache hit) | Exact duplicate receipts complete in < 200ms | MongoDB `jobs` collection timestamps | Verify Redis `ocr:file_hash:<sha256>` hit rate |
+| OCR Pool Throughput (worker) | Escalated pool ≤ 25s per hard receipt | `scripts/benchmark.py`; worker env must set `OMP_NUM_THREADS=1`/`OMP_THREAD_LIMIT=1` | Without the OMP caps, concurrent Tesseract subprocesses thrash the CPU — measured 258-309s for a grid that runs in ~4s capped (26x penalty). Post-fix benchmark: fast-path avg 1.4s, pooled avg 13.7s, max 22.6s across the 14-receipt corpus |
 | Celery Task Success Rate | ≥ 97% (after 3 retries) | MongoDB job status field | Alert on consecutive failures; inspect worker logs |
 | Callback Delivery | 100% on completed/failed jobs | Application logs (`app.core.callback`) | Re-trigger callback manually if SERMS/PRS reports gap |
 | Composite Confidence Score | 95% of receipts score ≥ 0.75 | MongoDB `composite_confidence_score` field | Review Paddle/Tesseract cross-reference, preprocessing, or Ollama extraction quality |
@@ -86,6 +87,8 @@ All observability is currently via **Docker container logs** and **MongoDB job r
 ## 5. Routine Operations
 
 - **Dependency updates:** Regularly run `pip list --outdated` inside the container and update `pyproject.toml`. Always re-run `docker compose up --build` and `pytest` after updates.
+- **Worker process pre-warming:** Celery worker processes automatically initialize PaddleOCR, Sentence-Transformers (`all-MiniLM-L6-v2`), and category prototype embeddings during worker process initialization (`@worker_process_init.connect`). This eliminates cold-start penalties on initial OCR tasks.
+- **Ollama model residency:** Configured via `OLLAMA_KEEP_ALIVE=-1` and auto-warmed via `scripts/ollama-entrypoint.sh` upon startup. This keeps Qwen2.5 1.5B resident in memory indefinitely, preventing costly CPU re-prefill and KV-cache rebuilds between jobs.
 - **Alembic migrations:** Any schema change to the PostgreSQL `receipt_embeddings` table must be applied via Alembic before deploying new code: `alembic upgrade head`.
 - **MongoDB storage:** Monitor the `ocr_mongo_data` volume growth; the `jobs` collection accumulates all OCR results.
 - **Ollama model management:** Qwen2.5 1.5B is pulled automatically by `scripts/ollama-entrypoint.sh` on first start. To upgrade the model, update the entrypoint script and re-deploy.

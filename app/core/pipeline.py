@@ -17,35 +17,44 @@ amounts remain deterministic and every optional assist fails soft.
 
 from __future__ import annotations
 
-import logging
-from io import BytesIO
-
 import asyncio
 import functools
+import logging
+import time
+from io import BytesIO
+
 import httpx
 from PIL import Image
 
+from app.api.schemas.ocr import build_callback_payload
+from app.config import settings
 from app.core.callback import send_callback
-import time
 from app.core.confidence import ConfidenceBreakdown, compute_confidence
 from app.core.extraction import Extraction, extract, fast_path_sufficient
+from app.core.file_cache import (
+    compute_content_hash,
+    get_cached_ocr_result,
+    pop_cached_bytes,
+    set_cached_ocr_result,
+)
+from app.core.financial_semantics import (
+    FinancialSemantics,
+    infer_tax_basis,
+    semantics_requested,
+    validate_financial_semantics,
+)
+from app.core.image_quality import NOT_A_RECEIPT_REASON
+from app.core.image_stitcher import stitch_segments
 from app.core.ocr_engine import OcrBundle, rank_candidates, read_pooled
 from app.core.pdf_handler import pdf_to_images
-from app.core.image_stitcher import stitch_segments
-from app.core.image_quality import NOT_A_RECEIPT_REASON
+from app.core.postprocessing import normalize_extraction
 from app.core.verification import Verification, verify
-from app.api.schemas.ocr import build_callback_payload
-from app.core.financial_semantics import (
-    FinancialSemantics, infer_tax_basis, semantics_requested, validate_financial_semantics,
-)
-from app.config import settings
 from app.db.models import ReceiptEmbedding
 from app.db.mongodb import MongoDBClient
 from app.db.postgres import AsyncSessionLocal
 from app.embeddings.generator import EmbeddingGenerator
 from app.embeddings.similarity import find_similar_receipts
 from app.llm.factory import create_provider
-from app.core.postprocessing import normalize_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +63,9 @@ MAX_PDF_PAGES = 5
 
 
 async def download_file(url: str) -> bytes:
+    cached = await pop_cached_bytes(url)
+    if cached is not None:
+        return cached
     async with httpx.AsyncClient() as client:
         response = await client.get(url, timeout=DOWNLOAD_TIMEOUT)
         response.raise_for_status()
@@ -99,10 +111,12 @@ async def process_receipt(
     try:
         await MongoDBClient.update_job_status(job_id, "processing")
 
+        raw_bytes_list: list[bytes] = []
         if file_urls and len(file_urls) >= 2:
             segment_images: list[Image.Image] = []
             for url in file_urls:
                 b = await download_file(url)
+                raw_bytes_list.append(b)
                 imgs = load_images(b, url)
                 if imgs:
                     segment_images.append(imgs[0])
@@ -112,10 +126,66 @@ async def process_receipt(
         else:
             primary_url = file_url or (file_urls[0] if file_urls else "")
             file_bytes = await download_file(primary_url)
+            raw_bytes_list.append(file_bytes)
             images = load_images(file_bytes, primary_url)
 
         if not images:
             raise ValueError("No images extracted from file")
+
+        content_hash = compute_content_hash(
+            raw_bytes_list, country=country, currency=currency, location=location
+        )
+
+        if not force_process:
+            cached_ocr = await get_cached_ocr_result(content_hash)
+            if cached_ocr is not None:
+                logger.info("Bypassing OCR pipeline via 90-day hash cache hit (job=%s)", job_id)
+                combined_text = cached_ocr.get("combined_text", "")
+                t0_embed = time.perf_counter()
+                embedding = None
+                if combined_text.strip():
+                    try:
+                        embedding = await asyncio.to_thread(
+                            EmbeddingGenerator.generate, combined_text
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Embedding generation failed for cached receipt %s: %s", receipt_id, exc)
+                await _store_embedding(receipt_id, source_service, combined_text, embedding)
+                t_embed = time.perf_counter() - t0_embed
+
+                t0_dup = time.perf_counter()
+                is_dup, dup_score, matches = await _evaluate_duplicate(
+                    receipt_id, source_service, combined_text, embedding
+                )
+                t_dup = time.perf_counter() - t0_dup
+
+                job_doc = dict(cached_ocr["job_document"])
+                job_doc["quality_override"] = force_process
+                job_doc["duplicate_check"] = {
+                    "is_duplicate": is_dup,
+                    "similarity_score": round(dup_score, 4) if dup_score is not None else None,
+                    "matches_count": len(matches),
+                }
+                await MongoDBClient.update_job_status(job_id, "completed", job_doc)
+
+                cb_payload = build_callback_payload(
+                    receipt_id=receipt_id,
+                    fields=cached_ocr["callback_fields"],
+                    confidence=cached_ocr["confidence"],
+                    status="rejected" if is_dup else "completed",
+                    items=cached_ocr.get("items", []),
+                    tax_basis=cached_ocr.get("tax_basis"),
+                    financial_reconciliation_status=cached_ocr.get("financial_reconciliation_status"),
+                    needs_manual_review=cached_ocr.get("needs_manual_review"),
+                    is_duplicate=is_dup,
+                    duplicate_similarity=dup_score,
+                    rejection_code="duplicate" if is_dup else None,
+                    rejection_reason="Duplicate receipt detected based on semantic similarity." if is_dup else None,
+                )
+                if not await send_callback(callback_url, cb_payload.model_dump()):
+                    raise RuntimeError(f"Callback failed to {callback_url}")
+                logger.info("Job %s completed via 90-day cache hit (t_embed=%.3fs, t_dup=%.3fs)", job_id, t_embed, t_dup)
+                return
 
         t0_ocr = time.perf_counter()
         bundle, extraction, metrics = await _read_and_extract(
@@ -227,6 +297,34 @@ async def process_receipt(
             rejection_code="duplicate" if is_dup else None,
             rejection_reason="Duplicate receipt detected based on semantic similarity." if is_dup else None,
         )
+
+        # Cache valid extraction result in Redis for 90 days
+        try:
+            cache_data = {
+                "job_document": _job_document(
+                    bundle, extraction, verification, breakdown,
+                    force_process=force_process,
+                    is_duplicate=False,
+                    duplicate_similarity=None,
+                    matches_count=0,
+                ),
+                "combined_text": bundle.combined_text,
+                "confidence": breakdown.score,
+                "callback_fields": callback_fields,
+                "items": extraction.item_scan.payload() if extraction.item_scan else [],
+                "tax_basis": extraction.fields.get("tax_basis") if has_callback_semantics else None,
+                "financial_reconciliation_status": (
+                    extraction.fields.get("financial_reconciliation_status")
+                    if has_callback_semantics else None
+                ),
+                "needs_manual_review": (
+                    verification.needs_manual_review or extraction.fields.get("needs_manual_review", False)
+                ) if has_callback_semantics else None,
+            }
+            await set_cached_ocr_result(content_hash, cache_data)
+        except Exception as cache_exc:  # noqa: BLE001
+            logger.warning("Failed to save 90-day OCR result cache: %s", cache_exc)
+
         logger.info(
             "Job %s complete: engine=%s variant=%s psm=%s score=%.3f reasons=%s. "
             "Timing [Total OCR: %.3fs (Engine: %.3fs, LLM: %.3fs), Embed: %.3fs, Dup: %.3fs]",
@@ -239,7 +337,7 @@ async def process_receipt(
             raise RuntimeError(f"Callback failed to {callback_url}")
 
     except Exception as exc:
-        logger.error("Pipeline failed for job %s: %s", job_id, exc, exc_info=True)
+        logger.exception("Pipeline failed for job %s", job_id)
         await MongoDBClient.update_job_status(job_id, "failed", {"error": str(exc)})
         await send_callback(
             callback_url,
@@ -358,11 +456,13 @@ async def _extract_with_assists(
     tens of seconds and concurrent calls serialize on the model queue. Any
     failure leaves the deterministic result in place.
     """
+    embedder = _embedder()
     baseline = extract(
         bundle,
         caller_country=caller_country,
         caller_currency=caller_currency,
         caller_location=caller_location,
+        embedder=embedder,
     )
 
     vendor_candidates = baseline.vendor_choice.shortlist if baseline.vendor_choice else []
@@ -388,9 +488,21 @@ async def _extract_with_assists(
             and not reconciled_on_net
         )
 
-    want_semantics = semantics_requested(
-        bundle.combined_text, currency_ambiguous=baseline.fields.get("currency") is None
-    )
+    # Smart gating: if currency is already resolved and the baseline is reconciled
+    # or explicit tax wording is present, extract() ignores LLM semantics anyway.
+    want_semantics = False
+    currency_known = baseline.fields.get("currency") is not None
+    if not currency_known:
+        want_semantics = semantics_requested(bundle.combined_text, currency_ambiguous=True)
+    elif not baseline.reconciled:
+        inferred_basis, basis_evidence = infer_tax_basis(
+            bundle.combined_text, baseline.fields.get("country")
+        )
+        is_fallback = basis_evidence in (
+            ["PH country fallback"], ["US country fallback"], ["MY SST/GST fallback"],
+        )
+        if inferred_basis == "unknown" or is_fallback:
+            want_semantics = semantics_requested(bundle.combined_text, currency_ambiguous=False)
 
     semantics: FinancialSemantics | None = None
     vendor_choice: str | None = None
@@ -418,11 +530,9 @@ async def _extract_with_assists(
             if want_subtotal:
                 corrected_subtotal = _float_or_none(raw.get("subtotal"))
 
-    embedder = _embedder()
-
-    if (vendor_choice is None and location_choice is None and embedder is None
+    if (vendor_choice is None and location_choice is None
             and semantics is None and corrected_subtotal is None):
-        await normalize_extraction(baseline, bundle)
+        await normalize_extraction(baseline, bundle, use_llm=settings.enable_llm_item_normalization)
         return baseline
 
     final_extraction = await asyncio.to_thread(
@@ -441,7 +551,7 @@ async def _extract_with_assists(
         )
     )
     
-    await normalize_extraction(final_extraction, bundle)
+    await normalize_extraction(final_extraction, bundle, use_llm=settings.enable_llm_item_normalization)
     return final_extraction
 
 

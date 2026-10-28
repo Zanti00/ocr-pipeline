@@ -94,11 +94,16 @@ Stores complete metadata payloads.
 Redis is utilized as Celery's message broker and as a light caching layer for quick duplicate matching.
 
 - **Celery Queues:** Standard Celery broker keys (`celery`, `celery-task-meta-*`).
-- **File Hashing Cache:** 
-  - **Key Structure:** `ocr:file_hash:<sha256_hash>`
-  - **Value:** `job_id` (string)
-  - **TTL:** 90 Days
-  - **Purpose:** If a matching file hash is submitted, bypass background worker OCR execution entirely and reuse the existing job metadata.
+- **Ephemeral Byte Handoff Cache:**
+  - **Key Structure:** `ocr:file_bytes:<url_sha256>`
+  - **Value:** Raw binary image bytes (pre-validated by FastAPI).
+  - **TTL:** 10 Minutes (600 seconds)
+  - **Purpose:** Eliminates redundant downloads between FastAPI upload pre-validation and the Celery worker. The worker pops this key atomically via `GETDEL` upon job pickup.
+- **File Hashing Result Cache:** 
+  - **Key Structure:** `ocr:file_hash:<content_sha256>`
+  - **Value:** Serialized JSON payload containing `raw_text`, `primary_reading`, `extracted_fields`, `bir_validation`, `confidence`, `financial_semantics`, and `reconciliation_audit`.
+  - **TTL:** 90 Days (7,776,000 seconds)
+  - **Purpose:** If a matching file hash is submitted, bypass background worker OCR and LLM execution entirely, re-using extracted fields while generating fresh pgvector embeddings and triggering callback delivery for the new `receipt_id`.
 - **API Rate Limiting:**
   - **Key Structure:**
     - Authenticated: `ocr:ratelimit:svc:<source_service>:<route_group>` (`ocr`, `duplicate`, `read`)

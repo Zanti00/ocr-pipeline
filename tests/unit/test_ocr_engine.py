@@ -1,7 +1,7 @@
 import pytest
 
-from app.core.anchors import AnchorScore
 from app.core import ocr_engine
+from app.core.anchors import AnchorScore
 from app.core.ocr_engine import OcrReading, select_primary
 
 
@@ -357,3 +357,30 @@ def test_supporting_readings_keep_strong_runner_ups():
     supporting = _supporting_readings([primary, runner], primary, pool_size=2)
 
     assert supporting == [runner]
+
+
+def test_read_paddle_sets_det_limit_on_tall_receipts(monkeypatch):
+    from PIL import Image
+    captured = {}
+
+    class FakePredictEngine:
+        def predict(self, img_array, **kwargs):
+            captured["kwargs"] = kwargs
+            return [{
+                "rec_texts": ["Total 10.00"],
+                "rec_scores": [0.99],
+                "rec_boxes": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+            }]
+
+    monkeypatch.setattr(ocr_engine, "_get_paddle_ocr", lambda: FakePredictEngine())
+
+    # Tall portrait receipt: width=200, height=500 -> aspect height >= 2 * width
+    tall_img = Image.new("RGB", (200, 500), color="white")
+    ocr_engine.read_paddle(tall_img)
+    assert captured["kwargs"].get("text_det_limit_side_len") == 512
+
+    # Square receipt: width=400, height=400 -> det_limit not set
+    square_img = Image.new("RGB", (400, 400), color="white")
+    ocr_engine.read_paddle(square_img)
+    assert "text_det_limit_side_len" not in captured["kwargs"]
+
