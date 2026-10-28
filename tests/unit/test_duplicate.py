@@ -1,9 +1,15 @@
 """Unit tests for the duplicate detection feature and SERMS callback payload integration."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from app.api.schemas.duplicate import DuplicateCheckRequest, DuplicateCheckResponse, DuplicateMatch
-from app.api.schemas.ocr import build_callback_payload, OcrCallbackPayload
+
+from app.api.schemas.duplicate import (
+    DuplicateCheckRequest,
+    DuplicateCheckResponse,
+    DuplicateMatch,
+)
+from app.api.schemas.ocr import build_callback_payload
 
 
 class TestDuplicateSchemas:
@@ -84,3 +90,32 @@ class TestDuplicateRouteHandler:
         assert res.is_duplicate is False
         assert res.matches == []
         mock_generate.assert_not_called()
+
+    @patch("app.api.routes.duplicate.AsyncSessionLocal")
+    async def test_delete_receipt_embedding_success(self, mock_session_local):
+        from app.api.routes.duplicate import delete_receipt_embedding
+
+        mock_session = AsyncMock()
+        mock_session_local.return_value.__aenter__.return_value = mock_session
+
+        res = await delete_receipt_embedding(receipt_id=42, source_service="serms")
+
+        assert res.status_code == 204
+        mock_session.execute.assert_called_once()
+        mock_session.commit.assert_called_once()
+
+    @patch("app.api.routes.duplicate.AsyncSessionLocal")
+    async def test_delete_receipt_embedding_error_raises_500(self, mock_session_local):
+        from fastapi import HTTPException
+
+        from app.api.routes.duplicate import delete_receipt_embedding
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = RuntimeError("DB connection error")
+        mock_session_local.return_value.__aenter__.return_value = mock_session
+
+        with pytest.raises(HTTPException) as exc_info:
+            await delete_receipt_embedding(receipt_id=42, source_service="serms")
+
+        assert exc_info.value.status_code == 500
+        assert "Failed to delete embedding" in exc_info.value.detail
