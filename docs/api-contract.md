@@ -119,6 +119,13 @@ Checks for duplicate receipts.
 }
 ```
 
+### DELETE `/api/duplicate/embeddings/{receipt_id}`
+Purges the stored `pgvector` embedding for a receipt upon deletion or cancellation. Returns `204 No Content` on success.
+```http
+DELETE /api/duplicate/embeddings/42
+Authorization: Bearer <API_KEY>
+```
+
 ## Financial context and callback additions
 `POST /api/ocr/process` accepts optional flat context fields. They are normalized before queueing and propagated unchanged through the job:
 ```json
