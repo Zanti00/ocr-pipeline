@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 markers = [
     "live_llm: opt-in tests requiring a reachable Ollama service",
 ]

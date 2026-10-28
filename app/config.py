@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     app_name: str = "ocr-pipeline"
     app_env: str = "development"
@@ -18,13 +19,20 @@ class Settings(BaseSettings):
     ollama_base_url: str
     ollama_model: str
     llm_provider: str = "ollama"
-    # How long the model stays resident in memory after a call. Ollama's server
-    # default is 5 minutes; a longer value avoids a cold reload (full prefill)
-    # between calls, which on CPU is the dominant latency.
-    ollama_keep_alive: str = "10m"
-    # Explicit context window. Fixed num_ctx prevents the server from resizing
-    # (and re-prefilling) the KV cache when a prompt grows past the default.
-    ollama_num_ctx: int = 8192
+    # How long the model stays resident in memory after a call. -1 keeps the
+    # model permanently resident in memory to eliminate cold reload latency.
+    ollama_keep_alive: str = "-1"
+    # Explicit context window (4096 gives >2x headroom over the 6000-char prompt cap
+    # while halving KV cache allocation overhead).
+    ollama_num_ctx: int = 4096
+    # Timeout for optional LLM assists; fail soft to deterministic baseline
+    ollama_assist_timeout: float = 20.0
+    # Line items LLM normalization toggle (skips redundant 20-85s batch LLM call on CPU)
+    enable_llm_item_normalization: bool = False
+
+    # Cache TTLs (seconds)
+    file_cache_byte_ttl: int = 600          # 10 minutes ephemeral byte handoff
+    file_cache_result_ttl: int = 7776000     # 90 days file-hash result cache
 
     # Databases
     redis_url: str

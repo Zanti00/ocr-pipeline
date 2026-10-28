@@ -8,16 +8,16 @@ remain available for downstream reconciliation.
 
 from __future__ import annotations
 
-import logging
-import re
-import os
 import asyncio
+import logging
+import os
+import re
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Literal, Sequence
+from typing import Literal
 
 import numpy as np
-
 import pytesseract
 from PIL import Image
 
@@ -267,8 +267,30 @@ async def read_best(
     actual_variants = await loop.run_in_executor(ocr_executor, _build)
 
     def _run_variant(v_img, v_label, psm_val):
+        readings_cache = getattr(image, "_ocr_readings_cache", None)
+        if readings_cache is not None:
+            cached = readings_cache.get((v_label, psm_val, lang))
+            if cached is not None:
+                return OcrReading(
+                    text=cached.text,
+                    words=cached.words,
+                    confidence=cached.confidence,
+                    variant=v_label,
+                    psm=psm_val,
+                    engine=cached.engine,
+                    anchors=cached.anchors,
+                    lines=cached.lines,
+                )
+
         reading = read_variant(v_img, psm=psm_val, lang=lang)
         reading.variant = v_label
+        if readings_cache is not None:
+            readings_cache[(v_label, psm_val, lang)] = reading
+        elif hasattr(image, "__dict__"):
+            try:
+                image._ocr_readings_cache = {(v_label, psm_val, lang): reading}
+            except AttributeError:
+                pass
         return reading
 
     tasks = []
@@ -401,7 +423,7 @@ def read_paddle(image: Image.Image) -> OcrReading:
     # a minute per call on it. 512 was measured to cut that time by ~30% with
     # identical line/character output on long grocery receipts, so the reduced
     # detector context does not lose lines.
-    height, width = image.size
+    width, height = image.size
     det_limit = 512 if height >= 2.0 * width else None
 
     if hasattr(engine, "predict"):
@@ -517,6 +539,15 @@ def read_fast(image: Image.Image, lang: str = "eng") -> OcrReading:
     prepared = preprocess_image(image)
     reading = read_variant(prepared, psm=FAST_PATH_PSM, lang=lang)
     reading.variant = "fast"
+    if hasattr(image, "__dict__"):
+        try:
+            cache = getattr(image, "_ocr_readings_cache", None)
+            if cache is None:
+                cache = {}
+                image._ocr_readings_cache = cache
+            cache[("clean", FAST_PATH_PSM, lang)] = reading
+        except AttributeError:
+            pass
     return reading
 
 
@@ -534,6 +565,15 @@ def read_fast_fallback(image: Image.Image, lang: str = "eng") -> OcrReading:
     variants = {v.label: v.image for v in build_variants(image)}
     reading = read_variant(variants["flat"], psm=11, lang=lang)
     reading.variant = "fast_alt"
+    if hasattr(image, "__dict__"):
+        try:
+            cache = getattr(image, "_ocr_readings_cache", None)
+            if cache is None:
+                cache = {}
+                image._ocr_readings_cache = cache
+            cache[("flat", 11, lang)] = reading
+        except AttributeError:
+            pass
     return reading
 
 
@@ -638,7 +678,7 @@ async def read_pooled(
     if isinstance(tesseract_res, Exception):
         logger.warning("Tesseract OCR failed; continuing with PaddleOCR: %s", tesseract_res)
     else:
-        best_tess, tess_cands = tesseract_res
+        _best_tess, tess_cands = tesseract_res
         candidates.extend(c for c in tess_cands if c.text.strip())
 
     if not candidates:

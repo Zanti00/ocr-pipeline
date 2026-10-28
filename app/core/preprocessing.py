@@ -78,25 +78,42 @@ def correct_orientation(image: Image.Image) -> Image.Image:
     Requires the ``osd`` traineddata; if unavailable the image is returned
     unchanged rather than failing the job.
     """
+    cached = getattr(image, "_ocr_upright", None)
+    if cached is not None:
+        return cached
+
     try:
         osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
         rotate = int(osd.get("rotate", 0)) % 360
         confidence = float(osd.get("orientation_conf", 0.0))
     except Exception as exc:  # pragma: no cover - depends on tessdata presence
         logger.debug("Orientation detection unavailable: %s", exc)
+        try:
+            image._ocr_upright = image
+        except AttributeError:
+            pass
         return image
 
-    if not rotate:
-        return image
-    if confidence < MIN_ORIENTATION_CONFIDENCE:
-        logger.debug(
-            "Ignoring %s deg orientation: confidence %.2f below %.2f",
-            rotate, confidence, MIN_ORIENTATION_CONFIDENCE,
-        )
+    if not rotate or confidence < MIN_ORIENTATION_CONFIDENCE:
+        if rotate and confidence < MIN_ORIENTATION_CONFIDENCE:
+            logger.debug(
+                "Ignoring %s deg orientation: confidence %.2f below %.2f",
+                rotate, confidence, MIN_ORIENTATION_CONFIDENCE,
+            )
+        try:
+            image._ocr_upright = image
+        except AttributeError:
+            pass
         return image
 
     # PIL rotates counter-clockwise; OSD reports the clockwise correction.
-    return image.rotate(-rotate, expand=True, fillcolor="white")
+    upright = image.rotate(-rotate, expand=True, fillcolor="white")
+    try:
+        image._ocr_upright = upright
+        upright._ocr_upright = upright
+    except AttributeError:
+        pass
+    return upright
 
 
 def correct_perspective(gray: np.ndarray) -> tuple[np.ndarray, bool]:
@@ -273,16 +290,21 @@ def build_variants(image: Image.Image) -> list[Variant]:
     the previous fixed chain by a wide margin, so it earns a place as a genuine
     contender rather than a fallback.
     """
+    cached = getattr(image, "_ocr_variants", None)
+    if cached is not None:
+        return cached
+
     upright = correct_orientation(image)
     gray = to_gray(upright)
 
-    warped, did_warp = correct_perspective(gray)
-    base = upscale(warped)
-    if not did_warp:
-        base = upscale(gray)
+    cleaned = getattr(image, "_ocr_cleaned", None)
+    flattened = getattr(image, "_ocr_flattened", None)
 
-    flattened = remove_shadow(base)
-    cleaned = deskew(denoise(flattened))
+    if cleaned is None or flattened is None:
+        warped, did_warp = correct_perspective(gray)
+        base = upscale(warped if did_warp else gray)
+        flattened = remove_shadow(base)
+        cleaned = deskew(denoise(flattened))
 
     variants = [
         Variant("raw", Image.fromarray(gray)),
@@ -291,6 +313,12 @@ def build_variants(image: Image.Image) -> list[Variant]:
         Variant("contrast", Image.fromarray(enhance_contrast(cleaned))),
         Variant("sauvola", Image.fromarray(binarize_sauvola(cleaned))),
     ]
+    try:
+        image._ocr_variants = variants
+        if upright is not image:
+            upright._ocr_variants = variants
+    except AttributeError:
+        pass
     return variants
 
 
@@ -301,8 +329,27 @@ def preprocess_image(image: Image.Image) -> Image.Image:
     the shadow-flattened, denoised, deskewed grayscale - deliberately NOT
     binarised, since Tesseract 5's LSTM engine generally reads grayscale better.
     """
+    cached_variants = getattr(image, "_ocr_variants", None)
+    if cached_variants:
+        for v in cached_variants:
+            if v.label == "clean":
+                return v.image
+
     upright = correct_orientation(image)
     gray = to_gray(upright)
     warped, did_warp = correct_perspective(gray)
     base = upscale(warped if did_warp else gray)
-    return Image.fromarray(deskew(denoise(remove_shadow(base))))
+    flattened = remove_shadow(base)
+    cleaned = deskew(denoise(flattened))
+
+    try:
+        image._ocr_flattened = flattened
+        image._ocr_cleaned = cleaned
+        if upright is not image:
+            upright._ocr_flattened = flattened
+            upright._ocr_cleaned = cleaned
+    except AttributeError:
+        pass
+
+    return Image.fromarray(cleaned)
+

@@ -23,7 +23,7 @@ Acts as the entry point for all service-to-service communication. Exposes endpoi
 ### 1.2. Asynchronous Processing Worker Layer (Celery)
 Consists of dedicated background workers running Celery to isolate heavy CPU/Memory operations.
 - **`process_receipt_task`:** 
-  1. Downloads document from S3/Supabase.
+  1. Retrieves receipt bytes from Redis ephemeral byte cache (`ocr:file_bytes:<sha256>`), falling back to network download (S3/Supabase) on cache miss. Checks 90-day SHA-256 result cache (`ocr:file_hash:<sha256>`); if hit, bypasses OCR extraction and immediately executes vector embedding, duplicate detection, persistence, and webhook callback.
   2. Applies OpenCV filters (e.g., adaptive thresholding, deskewing).
   3. **Fast path (early exit):** runs a single cheap Tesseract pass over the preprocessed image (`read_fast`, PSM 6). If the reading's receipt-aware anchor score clears `FAST_PATH_ANCHOR_SCORE` (6.0), extraction runs against this single pass; when the money reconciles AND a total is present (`fast_path_sufficient`), the receipt ships immediately — skipping the multi-pass pool entirely. When the first pass scores below the threshold, a second cheap pass (`read_fast_fallback`) over the `flat` rendering at PSM 11 gets one more try before the pool, rescuing clean receipts whose best-effort rendering degrades (e.g. deskew/denoise hurting that particular image). Otherwise the worker **escalates**: PaddleOCR and the full Tesseract variant × PSM pool run concurrently, selecting the strongest reading by anchor scoring while retaining all candidates for amount/item reconciliation; failed engines degrade independently. Tall/narrow receipts (aspect ≥ 2.0, e.g. long grocery POS slips) get `text_det_limit_side_len=512` in `read_paddle` — measured ~30% faster with identical line/character output (the default 960px limit blows the internal image up to ~3820px). Supporting readings scoring below `primary.score / 2.0` are dropped from `combined_text` so Tesseract garbage never pollutes the LLM prompt. Item parsing handles price-first grocery layouts (`64.00 V` / `1 × 64.00` / barcode + store code) via a pending-item mechanism, and store-code names (uppercase + mixed alphanumeric tokens like `EP025G`) are kept verbatim — exempt from dictionary and LLM normalization.
   4. Generates a 384-dimensional semantic embedding via `sentence-transformers` (`all-MiniLM-L6-v2`) — computed **once** per job and reused for both duplicate detection and pgvector storage.
@@ -33,7 +33,7 @@ Consists of dedicated background workers running Celery to isolate heavy CPU/Mem
   8. Triggers the callback webhook to post results back to the caller.
 
 ### 1.3. Persistence & Cache Layer
-- **Redis:** Message broker for Celery and caching layer for file hashes.
+- **Redis:** Message broker for Celery, ephemeral byte handoff cache (`ocr:file_bytes:<url_sha256>`, TTL 10m) between API validation and Celery worker execution, and 90-day SHA-256 result cache (`ocr:file_hash:<content_sha256>`).
 - **MongoDB:** Flexible metadata storage. No relational constraints, allowing arbitrary line items, confidence scores, and raw OCR outputs to be stored as a single document.
 - **PostgreSQL (with pgvector):** Primary relational engine storing document embeddings and executing cosine similarity queries.
 
@@ -96,8 +96,12 @@ The microservice is configured using environment variables loaded at runtime via
 | `OCR_POOL_VARIANTS` | string | `all` | Comma-separated Tesseract preprocessing variants for the escalated pool (`raw,flat,clean,contrast,sauvola`, or `all`). Shrinking this trades accuracy for speed on hard receipts - see below. |
 | `OCR_POOL_PSMS` | string | `6,4,11` | Comma-separated Tesseract PSM modes for the escalated pool. |
 | `OMP_NUM_THREADS` / `OMP_THREAD_LIMIT` | integer | `1` | Container-level OpenMP caps. **Required for the worker**: Tesseract subprocesses otherwise spawn a full OpenMP team (8 threads) each, and 6 concurrent pool passes thrash the CPU - measured 26x SLOWER than sequential (258-309s vs 12s for the same 15-pass grid). With OMP capped to 1, the grid runs in ~4s with identical readings. |
-| `OLLAMA_KEEP_ALIVE` | string | `10m` | How long the Ollama model stays resident after a call. A longer value avoids a cold reload (full prefill) between calls, which on CPU-only inference is the dominant latency. |
-| `OLLAMA_NUM_CTX` | integer | `8192` | Explicit context window sent with each generation request. A fixed value prevents the server from resizing (and re-prefilling) the KV cache when the prompt grows past the default. |
+| `OLLAMA_KEEP_ALIVE` | string | `-1` | How long the Ollama model stays resident after a call (`-1` = indefinite, preventing cold KV cache reloads). |
+| `OLLAMA_NUM_CTX` | integer | `4096` | Explicit context window sent with each generation request. |
+| `OLLAMA_ASSIST_TIMEOUT` | float | `20.0` | Timeout in seconds for Ollama assist calls to prevent worker thread starvation. |
+| `ENABLE_LLM_ITEM_NORMALIZATION` | boolean | `false` | Whether to invoke Ollama for line-item noise normalization (disabled by default; regex/Levenshtein handles normalization deterministically). |
+| `FILE_CACHE_BYTE_TTL` | integer | `600` | TTL in seconds for ephemeral image byte handoff between FastAPI and Celery worker (10 minutes). |
+| `FILE_CACHE_RESULT_TTL` | integer | `7776000` | TTL in seconds for identical receipt SHA-256 result cache (90 days). |
 | `RATE_LIMIT_ENABLED` | boolean | `true` | Enable/disable API rate limiting middleware. |
 | `RATE_LIMIT_WINDOW_SECONDS` | integer | `60` | Duration of the sliding fixed-window bucket in seconds. |
 | `RATE_LIMIT_OCR_PER_MINUTE` | integer | `30` | Per-service limit for `POST /api/ocr/process`. |

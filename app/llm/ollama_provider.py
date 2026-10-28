@@ -8,19 +8,18 @@ from app.config import settings
 from app.llm.base import LLMProvider
 from app.llm.prompts import (
     ASSIST_LOCATION_QUESTION,
-    ASSISTS_PROMPT,
     ASSIST_SEMANTICS_QUESTION,
     ASSIST_SUBTOTAL_QUESTION,
     ASSIST_VENDOR_QUESTION,
+    ASSISTS_PROMPT,
+    BATCH_TEXT_NORMALIZATION_PROMPT,
     CATEGORY_TIEBREAK_PROMPT,
     FINANCIAL_SEMANTICS_PROMPT,
     ITEM_ANALYSIS_PROMPT,
     LOCATION_SELECTION_PROMPT,
     RECEIPT_EXTRACTION_PROMPT,
     VENDOR_SELECTION_PROMPT,
-    BATCH_TEXT_NORMALIZATION_PROMPT,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +259,9 @@ class OllamaProvider(LLMProvider):
             ocr_text=_bound_context(ocr_text),
         )
         return await self._generate(
-            prompt, token_limit=SELECTION_TOKEN_LIMIT + 128, timeout=150.0
+            prompt,
+            token_limit=SELECTION_TOKEN_LIMIT + 128,
+            timeout=settings.ollama_assist_timeout,
         )
 
     async def normalize_batch_texts(self, texts: list[str], context: str) -> list[str]:

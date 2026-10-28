@@ -125,21 +125,16 @@ def check_image_quality(image: Image.Image) -> QualityCheckResult:
 
     Checks are performed in priority order: size -> blur -> brightness -> non-receipt.
 
-    Size is evaluated on the shorter/longer sides rather than fixed width/height
-    axes. Thermal receipts are often tall and narrow (e.g. 225x571); a fixed
-    min-width of 300 rejected those even when OCR read them cleanly.
+    Size, blur, and brightness are rotation-invariant and evaluated first before
+    running the slower orientation check.
     """
-    upright = correct_orientation(image)
-    width, height = upright.size
-    resolution = (width, height)
-
-    # 1. Size / Resolution check (orientation-independent)
-    short_side, long_side = min(width, height), max(width, height)
+    raw_w, raw_h = image.size
+    short_side, long_side = min(raw_w, raw_h), max(raw_w, raw_h)
     min_short = settings.image_quality_min_short_side
     min_long = settings.image_quality_min_long_side
     if short_side < min_short or long_side < min_long:
         reason = (
-            f"Image dimensions ({width}x{height}px) are too small for accurate OCR. "
+            f"Image dimensions ({raw_w}x{raw_h}px) are too small for accurate OCR. "
             f"Minimum required is {min_short}px on the short side and "
             f"{min_long}px on the long side."
         )
@@ -148,12 +143,12 @@ def check_image_quality(image: Image.Image) -> QualityCheckResult:
             passed=False,
             rejection_code="too_small",
             rejection_reason=reason,
-            resolution=resolution,
+            resolution=(raw_w, raw_h),
         )
 
-    gray = to_gray(upright)
+    gray = to_gray(image)
 
-    # 2. Blur check via Laplacian variance
+    # 2. Blur check via Laplacian variance (rotation-invariant)
     blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     blur_thresh = settings.image_quality_blur_threshold
     if blur_score < blur_thresh:
@@ -164,10 +159,10 @@ def check_image_quality(image: Image.Image) -> QualityCheckResult:
             rejection_code="blurry",
             rejection_reason=reason,
             blur_score=round(blur_score, 2),
-            resolution=resolution,
+            resolution=(raw_w, raw_h),
         )
 
-    # 3. Brightness / Darkness check via mean pixel intensity
+    # 3. Brightness / Darkness check via mean pixel intensity (rotation-invariant)
     brightness = float(np.mean(gray))
     brightness_floor = settings.image_quality_brightness_floor
     if brightness < brightness_floor:
@@ -182,13 +177,18 @@ def check_image_quality(image: Image.Image) -> QualityCheckResult:
             rejection_reason=reason,
             blur_score=round(blur_score, 2),
             brightness=round(brightness, 2),
-            resolution=resolution,
+            resolution=(raw_w, raw_h),
         )
 
-    # 4. Non-receipt visual & selfie check
+    # 4. Orientation and non-receipt visual & selfie check
+    upright = correct_orientation(image)
+    width, height = upright.size
+    resolution = (width, height)
+    upright_gray = to_gray(upright) if upright is not image else gray
+
     if settings.image_quality_check_not_receipt and _check_non_receipt_heuristics(
         upright,
-        gray,
+        upright_gray,
         sat_thresh=settings.image_quality_max_saturation_mean,
         min_density=settings.image_quality_min_text_edge_density,
     ):
