@@ -33,13 +33,27 @@ When limits are exceeded, the API returns **`429 Too Many Requests`** along with
 ## Endpoints
 
 ### POST `/api/ocr/process`
-Submits a receipt for async processing.
+Submits a receipt for async processing. Accepts either a single `file_url` or a multi-part segment list `file_urls` (up to 6 segments for long/tall receipts).
 
-**Request:**
+**Request (single image):**
 ```json
 {
   "receipt_id": 42,
   "file_url": "https://...",
+  "callback_url": "https://...",
+  "source_service": "serms"
+}
+```
+
+**Request (multi-part long receipt):**
+```json
+{
+  "receipt_id": 42,
+  "file_urls": [
+    "https://.../segment_01.jpg",
+    "https://.../segment_02.jpg",
+    "https://.../segment_03.jpg"
+  ],
   "callback_url": "https://...",
   "source_service": "serms"
 }
@@ -57,7 +71,8 @@ Submits a receipt for async processing.
 **Response (422 Unprocessable Entity) — pre-OCR quality rejection:**
 
 Returned *synchronously* when the image fails blur / brightness / size checks
-and `force_process` is not set. **No Celery job is queued and no callback is
+and `force_process` is not set. In multi-segment requests, segments are checked
+in parallel and `segment_index` identifies the failing image. **No Celery job is queued and no callback is
 sent.** The client must surface `message` / `rejection_reason` as a toast or
 modal. A MongoDB audit row is still written with `status: "rejected"`.
 
@@ -134,3 +149,6 @@ Authorization: Bearer <API_KEY>
 Caller currency/country/location take priority over OCR context. Currency is validated internally as ISO-4217; the outbound callback retains the existing consumer allowlist and omits unsupported codes rather than rejecting the receipt.
 
 Callbacks may additionally include `tax_basis` (`inclusive|exclusive|unknown`), `financial_reconciliation_status`, and `needs_manual_review`. These are optional and legacy fields remain unchanged. Detailed semantics, evidence, reported/computed totals, discrepancy, tax-line breakdown, and review reasons are retained in the Mongo job document.
+
+For long receipts (>= 20 items), if item sums near-reconcile within 3% of subtotal/total, extracted items are preserved in `items`, `needs_manual_review` is set to `true`, `ocr_confidence_score` is capped at `0.79`, and the review reason is recorded as `near_reconciled`. If multi-segment ordering or overlap detection encounters an unexpected discontinuity, `needs_manual_review` is flagged with `segment_gap` (confidence capped at `0.75`).
+

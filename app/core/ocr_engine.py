@@ -577,9 +577,22 @@ def read_fast_fallback(image: Image.Image, lang: str = "eng") -> OcrReading:
     return reading
 
 
+_ITEM_ROW_DENSITY_RE = re.compile(
+    r"\b\d{1,3}\s*[xX×]\s*\d+[,.]\d{2}\b|\b\d+[,.]\d{2}\s+[VvEeZz]\b|\b\d{8,14}\b"
+)
+
+
 def _fast_path_eligible(reading: OcrReading) -> bool:
-    """Anchor score alone decides eligibility; extraction confirms afterwards."""
-    return reading.score >= FAST_PATH_ANCHOR_SCORE
+    """Anchor score or item density decides eligibility; extraction confirms afterwards."""
+    if reading.score >= FAST_PATH_ANCHOR_SCORE:
+        return True
+    # Middle segments of long receipts lack headers/totals but have dense item rows
+    if reading.anchors and reading.anchors.money_tokens >= 4 and reading.confidence >= 0.70:
+        lines = reading.text.splitlines()
+        item_matches = sum(1 for ln in lines if _ITEM_ROW_DENSITY_RE.search(ln))
+        if item_matches >= 5:
+            return True
+    return False
 
 
 async def read_pooled(

@@ -44,10 +44,14 @@ from app.core.financial_semantics import (
     validate_financial_semantics,
 )
 from app.core.image_quality import NOT_A_RECEIPT_REASON
-from app.core.image_stitcher import stitch_segments
-from app.core.ocr_engine import OcrBundle, rank_candidates, read_pooled
+from app.core.ocr_engine import OcrBundle, OcrReading, rank_candidates, read_pooled
 from app.core.pdf_handler import pdf_to_images
 from app.core.postprocessing import normalize_extraction
+from app.core.segment_merger import (
+    merge_segment_readings,
+    order_segments,
+    split_tall_image_into_strips,
+)
 from app.core.verification import Verification, verify
 from app.db.models import ReceiptEmbedding
 from app.db.mongodb import MongoDBClient
@@ -60,6 +64,27 @@ logger = logging.getLogger(__name__)
 
 DOWNLOAD_TIMEOUT = 30.0
 MAX_PDF_PAGES = 5
+
+
+def compact_text_for_llm(text: str, head_lines: int = 30, tail_lines: int = 35) -> str:
+    """Slice middle item lines from very long OCR text to speed up LLM assists."""
+    lines = text.splitlines()
+    if len(lines) <= head_lines + tail_lines:
+        return text
+    omitted = len(lines) - head_lines - tail_lines
+    return "\n".join(
+        lines[:head_lines]
+        + [f"... [{omitted} middle item lines omitted for speed] ..."]
+        + lines[-tail_lines:]
+    )
+
+
+def compact_text_for_embedding(text: str, head_lines: int = 15, tail_lines: int = 15) -> str:
+    """Focus embedding on header metadata and footer totals rather than getting truncated after 256 tokens."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) <= head_lines + tail_lines:
+        return text
+    return "\n".join(lines[:head_lines] + lines[-tail_lines:])
 
 
 async def download_file(url: str) -> bytes:
@@ -112,25 +137,33 @@ async def process_receipt(
         await MongoDBClient.update_job_status(job_id, "processing")
 
         raw_bytes_list: list[bytes] = []
-        if file_urls and len(file_urls) >= 2:
-            segment_images: list[Image.Image] = []
-            for url in file_urls:
-                b = await download_file(url)
-                raw_bytes_list.append(b)
+        is_multipart = bool(file_urls and len(file_urls) >= 2)
+        segment_images: list[Image.Image] = []
+
+        if is_multipart:
+            download_tasks = [download_file(url) for url in file_urls]  # type: ignore[union-attr]
+            raw_bytes_list = list(await asyncio.gather(*download_tasks))
+            for b, url in zip(raw_bytes_list, file_urls):  # type: ignore[union-attr]
                 imgs = load_images(b, url)
                 if imgs:
                     segment_images.append(imgs[0])
             if len(segment_images) < 2:
                 raise ValueError("Failed to load at least 2 valid image segments")
-            images = [stitch_segments(segment_images)]
+            images = segment_images
         else:
             primary_url = file_url or (file_urls[0] if file_urls else "")
             file_bytes = await download_file(primary_url)
             raw_bytes_list.append(file_bytes)
             images = load_images(file_bytes, primary_url)
-
-        if not images:
-            raise ValueError("No images extracted from file")
+            if not images:
+                raise ValueError("No images extracted from file")
+            # Auto-tiling for single tall images
+            if settings.ocr_virtual_tiling and len(images) == 1:
+                strips = split_tall_image_into_strips(images[0])
+                if len(strips) > 1:
+                    segment_images = strips
+                    images = strips
+                    is_multipart = True
 
         content_hash = compute_content_hash(
             raw_bytes_list, country=country, currency=currency, location=location
@@ -145,8 +178,9 @@ async def process_receipt(
                 embedding = None
                 if combined_text.strip():
                     try:
+                        embed_text = compact_text_for_embedding(combined_text)
                         embedding = await asyncio.to_thread(
-                            EmbeddingGenerator.generate, combined_text
+                            EmbeddingGenerator.generate, embed_text
                         )
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("Embedding generation failed for cached receipt %s: %s", receipt_id, exc)
@@ -188,9 +222,15 @@ async def process_receipt(
                 return
 
         t0_ocr = time.perf_counter()
-        bundle, extraction, metrics = await _read_and_extract(
-            images, caller_country=country, caller_currency=currency, caller_location=location
-        )
+        if is_multipart:
+            bundle, extraction, metrics, gap_suspected = await _read_and_extract_segments(
+                images, caller_country=country, caller_currency=currency, caller_location=location
+            )
+        else:
+            bundle, extraction, metrics = await _read_and_extract(
+                images, caller_country=country, caller_currency=currency, caller_location=location
+            )
+            gap_suspected = False
         t_ocr_total = time.perf_counter() - t0_ocr
 
         if not force_process and not is_likely_receipt(bundle, extraction):
@@ -219,6 +259,7 @@ async def process_receipt(
             await send_callback(callback_url, payload.model_dump())
             return
 
+        near_reconciled = bool(extraction.item_scan and extraction.item_scan.near_reconciled)
         verification = verify(
             extraction.as_dict(),
             bundle.combined_text,
@@ -231,6 +272,8 @@ async def process_receipt(
             ) | {"tax_basis", "financial_reconciliation_status", "needs_manual_review",
                  "reported_total", "computed_total", "total_discrepancy"}
             | ({"location"} if location else set()),
+            near_reconciled=near_reconciled,
+            segment_gap=gap_suspected,
         )
         breakdown = compute_confidence(
             verification,
@@ -244,8 +287,9 @@ async def process_receipt(
         embedding = None
         if bundle.combined_text.strip():
             try:
+                embed_text = compact_text_for_embedding(bundle.combined_text)
                 embedding = await asyncio.to_thread(
-                    EmbeddingGenerator.generate, bundle.combined_text
+                    EmbeddingGenerator.generate, embed_text
                 )
             except Exception as exc:
                 logger.warning(
@@ -441,6 +485,105 @@ def _rank_of(pair: tuple[OcrBundle, Extraction]) -> tuple[int, int, float]:
     )
 
 
+async def _read_and_extract_segments(
+    segment_images: list[Image.Image],
+    *,
+    caller_country: str | None = None,
+    caller_currency: str | None = None,
+    caller_location: str | None = None,
+) -> tuple[OcrBundle, Extraction, dict, bool]:
+    """Process multiple segments (multi-part uploads or virtual strips).
+
+    Runs fast OCR concurrently per segment, auto-orders them, removes seam duplicates,
+    and constructs a unified OcrBundle before running extraction.
+    """
+    metrics = {"engine": 0.0, "llm": 0.0}
+
+    # 1. Parallel Fast Pass across all segments
+    t0_engine = time.perf_counter()
+    tasks = [read_pooled(img, lang="eng", fast_path=True) for img in segment_images]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    metrics["engine"] += time.perf_counter() - t0_engine
+
+    valid_pairs: list[tuple[Image.Image, OcrReading]] = []
+    for idx, res in enumerate(results):
+        if isinstance(res, Exception):
+            logger.warning("Segment %s fast OCR failed: %s", idx, res)
+            continue
+        valid_pairs.append((segment_images[idx], res.primary))
+
+    if not valid_pairs:
+        raise RuntimeError("All segments failed fast OCR")
+
+    # 2. Auto-order segments
+    ordered_pairs = order_segments(valid_pairs)
+
+    # 3. Text-level seam merge
+    merged_reading, gap_suspected = merge_segment_readings(ordered_pairs)
+    merged_bundle = OcrBundle(
+        primary=merged_reading,
+        supporting=[],
+        all_readings=[merged_reading],
+        early_exit=True,
+    )
+
+    # 4. Fast deterministic extraction over merged reading
+    embedder = _embedder()
+    baseline = extract(
+        merged_bundle,
+        caller_country=caller_country,
+        caller_currency=caller_currency,
+        caller_location=caller_location,
+        embedder=embedder,
+    )
+
+    is_sufficient = (
+        (baseline.reconciled or (baseline.item_scan and baseline.item_scan.near_reconciled))
+        and baseline.fields.get("total_amount") is not None
+    )
+
+    if is_sufficient:
+        await normalize_extraction(baseline, merged_bundle, use_llm=False)
+        return merged_bundle, baseline, metrics, gap_suspected
+
+    # 5. Selective escalation: re-run pooled OCR on segments with low confidence
+    logger.info("Multi-segment fast path insufficient; selectively evaluating pooled OCR")
+    t0_esc = time.perf_counter()
+    escalated_pairs: list[tuple[Image.Image, OcrReading]] = []
+    for img, reading in ordered_pairs:
+        if reading.confidence < 0.72 and not getattr(img, "_is_virtual_strip", False):
+            try:
+                pooled_b = await read_pooled(img, lang="eng", fast_path=False)
+                escalated_pairs.append((img, pooled_b.primary))
+            except Exception as exc:
+                logger.warning("Segment pooled escalation failed: %s", exc)
+                escalated_pairs.append((img, reading))
+        else:
+            escalated_pairs.append((img, reading))
+    metrics["engine"] += time.perf_counter() - t0_esc
+
+    if [id(r) for _, r in escalated_pairs] != [id(r) for _, r in ordered_pairs]:
+        merged_reading, gap_suspected = merge_segment_readings(escalated_pairs)
+        merged_bundle = OcrBundle(
+            primary=merged_reading,
+            supporting=[],
+            all_readings=[merged_reading],
+            early_exit=False,
+        )
+
+    # 6. Extract with assists on merged bundle
+    t0_llm = time.perf_counter()
+    extraction = await _extract_with_assists(
+        merged_bundle,
+        caller_country=caller_country,
+        caller_currency=caller_currency,
+        caller_location=caller_location,
+    )
+    metrics["llm"] += time.perf_counter() - t0_llm
+
+    return merged_bundle, extraction, metrics, gap_suspected
+
+
 async def _extract_with_assists(
     bundle: OcrBundle,
     *,
@@ -613,8 +756,9 @@ async def _ask_model_for_assists(
     """
     try:
         provider = create_provider()
+        compact_text = compact_text_for_llm(ocr_text)
         return await provider.analyze_assists(
-            ocr_text,
+            compact_text,
             vendor_candidates=vendor_candidates or None,
             excluded_vendors=excluded_vendors,
             location_candidates=location_candidates or None,
@@ -661,7 +805,8 @@ async def _store_embedding(
         return
     try:
         if embedding is None:
-            embedding = await asyncio.to_thread(EmbeddingGenerator.generate, text)
+            embed_text = compact_text_for_embedding(text)
+            embedding = await asyncio.to_thread(EmbeddingGenerator.generate, embed_text)
         async with AsyncSessionLocal() as session:
             session.add(
                 ReceiptEmbedding(
@@ -687,7 +832,8 @@ async def _evaluate_duplicate(
         return False, None, []
     try:
         if embedding is None:
-            embedding = await asyncio.to_thread(EmbeddingGenerator.generate, text)
+            embed_text = compact_text_for_embedding(text)
+            embedding = await asyncio.to_thread(EmbeddingGenerator.generate, embed_text)
         async with AsyncSessionLocal() as session:
             matches = await find_similar_receipts(
                 session=session,

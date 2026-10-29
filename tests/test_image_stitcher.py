@@ -31,6 +31,6 @@ def test_stitch_too_few_segments_raises_error():
 
 
 def test_stitch_exceeding_max_segments_raises_error():
-    imgs = [Image.new("RGB", (300, 200)) for _ in range(5)]
+    imgs = [Image.new("RGB", (300, 200)) for _ in range(7)]
     with pytest.raises(ValueError, match="Exceeded maximum segment count"):
         stitch_segments(imgs)

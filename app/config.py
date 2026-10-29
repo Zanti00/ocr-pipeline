@@ -66,11 +66,15 @@ class Settings(BaseSettings):
     # still load without error (values are ignored; short/long sides are used).
     image_quality_min_width: int = 200
     image_quality_min_height: int = 400
-    image_quality_max_segments: int = 4
+    image_quality_max_segments: int = 6
     image_quality_check_not_receipt: bool = True
     image_quality_max_face_area_ratio: float = 0.04
     image_quality_max_saturation_mean: float = 110.0
     image_quality_min_text_edge_density: float = 0.015
+
+    # Long receipt settings
+    ocr_max_items: int = 250
+    ocr_virtual_tiling: bool = True
 
     # Rate limiting config
     rate_limit_enabled: bool = True
