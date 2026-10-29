@@ -23,10 +23,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from app.config import settings
 from app.core.layout import _best_label, _collect_money_tokens
 from app.core.numbers import normalize_money
 from app.core.ocr_engine import Word
-from app.core.textquality import looks_like_words
 
 # Lines that introduce the item region. The region may also begin at a printed
 # rule, so a separator counts too.
@@ -63,7 +63,7 @@ _TRAILING_QUANTITY_RE = re.compile(
 )
 
 MAX_NAME_LENGTH = 255
-MAX_ITEMS = 40
+MAX_ITEMS = getattr(settings, "ocr_max_items", 250)
 
 # Stand-in for a name OCR could not read. Faded thermal print yields rows whose
 # price is perfectly legible and whose product name is noise ('ci cr } UM SDR \').
@@ -115,6 +115,7 @@ class ItemScan:
     total: float | None = None
     target: float | None = None
     notes: list[str] = field(default_factory=list)
+    near_reconciled: bool = False
 
     @property
     def count(self) -> int:
@@ -193,6 +194,7 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
     # held until the following lines supply the name, instead of emitting rows
     # named 'V' and treating the barcode line as a description.
     pending: ExtractedItem | None = None
+    pending_qty_prefix: tuple[int, float] | None = None
 
     def _flush_pending() -> None:
         nonlocal pending, seen_item
@@ -231,16 +233,36 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
             remainder = " ".join(
                 word.text for word in line if id(word) not in token_word_ids
             )
-            if pending is not None and _is_quantity_line(remainder):
-                # '1 × 64.00' repeats the pending item's price with its quantity.
-                # Merge rather than emit a duplicate row.
-                quantity = _quantity_of(remainder)
-                if quantity is not None:
-                    pending.quantity = quantity
+            if pending is not None:
+                if _is_quantity_line(remainder):
+                    quantity = _quantity_of(remainder)
+                    if quantity is not None:
+                        pending.quantity = quantity
+                    continue
+                qty_price_match = _QUANTITY_LINE_WITH_PRICE_RE.match(text)
+                if qty_price_match:
+                    q_digits = qty_price_match.group(1).replace("I", "1").replace("l", "1")
+                    pending.quantity = max(1, int(q_digits))
+                    continue
+
+            # Check for split-line grocery format where quantity precedes price: '2 x 14.75'
+            qty_price_match = _QUANTITY_LINE_WITH_PRICE_RE.match(text)
+            if qty_price_match:
+                q_digits = qty_price_match.group(1).replace("I", "1").replace("l", "1")
+                q_val = max(1, int(q_digits))
+                u_val = float(qty_price_match.group(2).replace(",", "."))
+                pending_qty_prefix = (q_val, u_val)
                 continue
+
             _flush_pending()
             item = _build_item(remainder, money[-1], line_text=text)
             if item is not None:
+                if pending_qty_prefix is not None:
+                    q_val, u_val = pending_qty_prefix
+                    pending_qty_prefix = None
+                    if abs(q_val * u_val - item.price) <= 0.05 or abs(u_val - item.price) <= 0.05:
+                        item.quantity = q_val
+
                 if looks_like_item_name(item.name):
                     items.append(item)
                     seen_item = True
@@ -269,6 +291,9 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
 
 _QUANTITY_MARKER_RE = re.compile(r"^\s*[0-9Il]{1,3}\s*[xX×]\s*$")
 _QUANTITY_DIGITS_RE = re.compile(r"^\s*(\d{1,3})\s*[xX×]\s*$")
+_QUANTITY_LINE_WITH_PRICE_RE = re.compile(
+    r"^\s*([0-9Il]{1,3})\s*[xX×]\s*(\d{1,3}(?:[,.]\d{2})?)\s*$"
+)
 
 
 def _is_quantity_line(remainder: str) -> bool:
@@ -424,6 +449,23 @@ def reconcile_items(
                     f"items reconcile on {basis}: {total:.2f} vs {name}={target:.2f}"
                 )
                 return scan
+
+    # Long receipt fuzzy / near-reconciliation fallback (>= 20 items within 3% discrepancy)
+    if len(items) >= 20:
+        for basis, total in (("line_total", line_total), ("unit_price", unit_total)):
+            for name, target in candidates.items():
+                if target is not None and target > 0 and abs(total - target) / target <= 0.03:
+                    scan.reconciled = False
+                    scan.near_reconciled = True
+                    scan.price_basis = basis
+                    scan.total = total
+                    scan.target = target
+                    diff_pct = abs(total - target) / target * 100.0
+                    scan.notes.append(
+                        f"items near-reconciled on {basis} ({diff_pct:.1f}% discrepancy): "
+                        f"{total:.2f} vs {name}={target:.2f} -> emitted with manual review flag"
+                    )
+                    return scan
 
     scan.total = line_total
     scan.notes.append(

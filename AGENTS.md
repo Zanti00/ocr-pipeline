@@ -94,14 +94,14 @@ Interactive OpenAPI docs (stack must be running): http://localhost:8010/docs
 
 Each `process_receipt_task` Celery job runs these stages in order:
 
-1. **Download** — fetch file from `file_url` (image or PDF)
-2. **Pre-process** — OpenCV (grayscale, deskew, adaptive thresholding, denoising)
-3. **OCR** — PaddleOCR extracts primary text & geometry; Tesseract runs fallback passes; text quality scored (`app/core/textquality.py`)
-4. **LLM extraction** — Ollama `qwen2.5:1.5b` parses vendor, date, total, VAT, TIN, invoice number, line items, category
+1. **Download & Ingest** — fetch file from `file_url` or parallel `file_urls` (multi-segment receipts up to 6); 3-zone blur verification for tall receipts
+2. **Pre-process & Strip Tiling** — OpenCV (grayscale, deskew, adaptive thresholding, denoising); tall single-image receipts (`height >= 1800` & `aspect >= 2.8`) automatically sliced into overlapping strips
+3. **OCR & Seam Stitching** — PaddleOCR extracts primary text & geometry; Tesseract runs fallback passes; middle item segments bypass pool via density-aware fast path; multi-segment/strip texts merged via seam deduplication and coordinate translation; text quality scored (`app/core/textquality.py`)
+4. **LLM extraction** — Ollama `qwen2.5:1.5b` parses vendor, date, total, VAT, TIN, invoice number, line items, category (prompt bounded to top/bottom contexts on long receipts)
 5. **BIR validation** — `app/core/bir_validator.py` validates TIN format, VAT classification
-6. **Confidence scoring** — `app/core/confidence.py` computes a composite score (≥ 0.75 = acceptable)
+6. **Confidence scoring & Reconciliation** — `app/core/confidence.py` computes composite score (≥ 0.75 = acceptable); long receipts (≥ 20 items) near-reconciled within 3% emit line items with score capped at 0.79 (`REASON_NEAR_RECONCILED`)
 7. **Anomaly risk scoring** — `RandomForestClassifier` assigns a risk score (0.0–1.0) and category (`Low` / `Medium` / `High Risk`)
-8. **Embedding** — `all-MiniLM-L6-v2` generates a 384-dim vector; stored in PostgreSQL (`receipt_embeddings`)
+8. **Embedding** — `all-MiniLM-L6-v2` generates a 384-dim vector from compacted receipt text; stored in PostgreSQL (`receipt_embeddings`)
 9. **Duplicate detection** — cosine similarity search within a 90-day window; threshold `0.85`
 10. **Persist** — results written to MongoDB `ocr_jobs` collection; job status → `completed` or `failed`
 11. **Callback** — webhook `POST` to `callback_url` with full payload; 3 retries with exponential backoff (10 s → 30 s → 60 s)

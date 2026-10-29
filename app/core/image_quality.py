@@ -151,14 +151,33 @@ def check_image_quality(image: Image.Image) -> QualityCheckResult:
     # 2. Blur check via Laplacian variance (rotation-invariant)
     blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     blur_thresh = settings.image_quality_blur_threshold
-    if blur_score < blur_thresh:
+
+    # Zone-aware blur check for tall receipts: camera tilt can cause one end to be out-of-focus
+    is_tall = max(raw_w, raw_h) >= 2.0 * min(raw_w, raw_h)
+    min_zone_score = blur_score
+    if is_tall and min(raw_w, raw_h) >= 150:
+        if raw_h >= raw_w:
+            z_len = gray.shape[0] // 3
+            zones = [gray[0:z_len, :], gray[z_len:2*z_len, :], gray[2*z_len:, :]]
+        else:
+            z_len = gray.shape[1] // 3
+            zones = [gray[:, 0:z_len], gray[:, z_len:2*z_len], gray[:, 2*z_len:]]
+        zone_scores = [float(cv2.Laplacian(z, cv2.CV_64F).var()) for z in zones if z.size > 0]
+        if zone_scores:
+            min_zone_score = min(zone_scores)
+
+    if blur_score < blur_thresh or (is_tall and min_zone_score < blur_thresh * 0.55):
         reason = BLURRY_REASON
-        logger.info("Quality check failed [blurry]: score %.2f < threshold %.2f", blur_score, blur_thresh)
+        effective_score = min(blur_score, min_zone_score)
+        logger.info(
+            "Quality check failed [blurry]: score %.2f (min_zone=%.2f) < threshold %.2f",
+            blur_score, min_zone_score, blur_thresh,
+        )
         return QualityCheckResult(
             passed=False,
             rejection_code="blurry",
             rejection_reason=reason,
-            blur_score=round(blur_score, 2),
+            blur_score=round(effective_score, 2),
             resolution=(raw_w, raw_h),
         )
 

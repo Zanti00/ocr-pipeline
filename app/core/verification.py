@@ -28,6 +28,8 @@ REASON_LOCALE = "locale_unresolved"
 REASON_REJECTED = "ungrounded_values_rejected"
 REASON_TAX_ID_AMBIGUOUS = "tax_id_ambiguous"
 REASON_NON_LATIN = "non_latin_script"
+REASON_SEGMENT_GAP = "segment_gap_suspected"
+REASON_NEAR_RECONCILED = "near_reconciled"
 
 # Confidence ceilings per condition, calibrated to the consumer's threshold.
 # SERMS routes anything below 0.80 to 'flagged' for manual confirmation
@@ -43,6 +45,8 @@ REASON_CAPS: dict[str, float] = {
     REASON_LOCALE: 0.70,
     REASON_TAX_ID_AMBIGUOUS: 0.70,
     REASON_NON_LATIN: 0.45,
+    REASON_SEGMENT_GAP: 0.75,
+    REASON_NEAR_RECONCILED: 0.79,
 }
 
 # Below this share of legible characters the page is treated as unreadable.
@@ -87,6 +91,8 @@ def verify(
     mean_word_confidence: float = 0.0,
     tax_id_ambiguous: bool = False,
     derived_fields: set[str] | None = None,
+    near_reconciled: bool = False,
+    segment_gap: bool = False,
 ) -> Verification:
     """Reject ungrounded values and decide whether a human needs to look.
 
@@ -128,6 +134,8 @@ def verify(
         locale_resolved=locale_resolved,
         mean_word_confidence=mean_word_confidence,
         tax_id_ambiguous=tax_id_ambiguous,
+        near_reconciled=near_reconciled,
+        segment_gap=segment_gap,
     )
     return result
 
@@ -165,13 +173,20 @@ def _collect_reasons(
     locale_resolved: bool,
     mean_word_confidence: float,
     tax_id_ambiguous: bool,
+    near_reconciled: bool = False,
+    segment_gap: bool = False,
 ) -> None:
     if result.rejected:
         result.reasons.append(REASON_REJECTED)
     if result.fields.get("total_amount") is None:
         result.reasons.append(REASON_NO_TOTAL)
     if not reconciled:
-        result.reasons.append(REASON_RECONCILE)
+        if near_reconciled:
+            result.reasons.append(REASON_NEAR_RECONCILED)
+        else:
+            result.reasons.append(REASON_RECONCILE)
+    if segment_gap:
+        result.reasons.append(REASON_SEGMENT_GAP)
     if not locale_resolved:
         result.reasons.append(REASON_LOCALE)
     if tax_id_ambiguous:

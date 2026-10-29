@@ -14,6 +14,7 @@ from app.api.schemas.ocr import (
     QualityRejectionResponse,
     build_callback_payload,
 )
+from app.config import settings
 from app.core.callback import send_callback
 from app.core.file_cache import cache_downloaded_bytes
 from app.core.image_quality import check_image_quality
@@ -42,21 +43,32 @@ async def process_receipt(
     urls = request.file_urls if (request.file_urls and len(request.file_urls) > 0) else ([request.file_url] if request.file_url else [])
     if not urls:
         raise HTTPException(status_code=400, detail="Either file_url or file_urls must be provided.")
+    if len(urls) > settings.image_quality_max_segments:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Exceeded maximum segment count of {settings.image_quality_max_segments} (got {len(urls)}).",
+        )
 
     # Synchronous pre-OCR quality check if force_process is False.
     # Rejection is immediate (HTTP 422) — we also dispatch a callback if callback_url is present
     # so async consumers receive the rejection event.
     if not request.force_process:
         try:
-            for idx, url in enumerate(urls):
+            async def _check_one_segment(idx: int, url: str):
                 if url.lower().split("?")[0].endswith(".pdf"):
                     # Quality check on PDF is skipped in FastAPI; handled by worker
-                    continue
-
+                    return idx, url, None, None
                 file_bytes = await _download_file(url)
                 pil_img = Image.open(BytesIO(file_bytes))
-                result = await asyncio.to_thread(check_image_quality, pil_img)
-                if not result.passed:
+                res = await asyncio.to_thread(check_image_quality, pil_img)
+                return idx, url, file_bytes, res
+
+            check_tasks = [_check_one_segment(i, u) for i, u in enumerate(urls)]
+            segment_results = await asyncio.gather(*check_tasks)
+            segment_results.sort(key=lambda x: x[0])
+
+            for idx, url, file_bytes, result in segment_results:
+                if result is not None and not result.passed:
                     segment_idx = idx if len(urls) > 1 else None
                     reason = result.rejection_reason or "Image quality check failed."
                     code = result.rejection_code or "quality_failed"
@@ -130,7 +142,10 @@ async def process_receipt(
                         content=response_payload.model_dump(),
                     )
                 # Store downloaded bytes in Redis for worker handoff (avoids second network download)
-                await cache_downloaded_bytes(url, file_bytes)
+                if file_bytes is not None:
+                    await cache_downloaded_bytes(url, file_bytes)
+        except HTTPException:
+            raise
         except Exception:
             logger.exception("Pre-OCR quality check failed with exception")
             # If image download fails during quality check, let Celery task handle download error or fail fast
