@@ -384,3 +384,30 @@ def test_read_paddle_sets_det_limit_on_tall_receipts(monkeypatch):
     ocr_engine.read_paddle(square_img)
     assert "text_det_limit_side_len" not in captured["kwargs"]
 
+
+def test_read_paddle_uses_correct_orientation(monkeypatch):
+    from PIL import Image
+    captured = {}
+
+    class FakePredictEngine:
+        def predict(self, img_array, **kwargs):
+            captured["shape"] = img_array.shape
+            return [{
+                "rec_texts": ["Total 10.00"],
+                "rec_scores": [0.99],
+                "rec_boxes": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+            }]
+
+    monkeypatch.setattr(ocr_engine, "_get_paddle_ocr", lambda: FakePredictEngine())
+
+    # Mock correct_orientation to return an upright image (height 300, width 100)
+    upright = Image.new("RGB", (100, 300), color="white")
+    monkeypatch.setattr(ocr_engine, "correct_orientation", lambda img: upright)
+
+    sideways_img = Image.new("RGB", (300, 100), color="white")
+    ocr_engine.read_paddle(sideways_img)
+
+    # Confirm Paddle was passed the array from the upright image
+    assert captured["shape"] == (300, 100, 3)
+
+
