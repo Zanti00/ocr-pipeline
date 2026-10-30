@@ -22,7 +22,7 @@ import pytesseract
 from PIL import Image
 
 from app.core.anchors import AnchorScore, score_text
-from app.core.preprocessing import Variant, build_variants
+from app.core.preprocessing import Variant, build_variants, correct_orientation
 
 logger = logging.getLogger(__name__)
 
@@ -414,7 +414,8 @@ def read_paddle(image: Image.Image) -> OcrReading:
     if engine is None:
         raise RuntimeError("PaddleOCR is not initialized")
 
-    img_array = np.array(image.convert("RGB"))
+    upright = correct_orientation(image)
+    img_array = np.array(upright.convert("RGB"))
     words: list[Word] = []
     confidences: list[float] = []
 
@@ -423,7 +424,7 @@ def read_paddle(image: Image.Image) -> OcrReading:
     # a minute per call on it. 512 was measured to cut that time by ~30% with
     # identical line/character output on long grocery receipts, so the reduced
     # detector context does not lose lines.
-    width, height = image.size
+    width, height = upright.size
     det_limit = 512 if height >= 2.0 * width else None
 
     if hasattr(engine, "predict"):
