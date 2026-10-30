@@ -76,9 +76,12 @@ def validate_financial_semantics(raw: Any, ocr_text: str = "") -> FinancialSeman
         currency_confidence = 0.0
     currency = normalize_iso_currency(raw.get("currency")) or UNKNOWN
     currency_evidence = _evidence_list(raw.get("currency_evidence", raw.get("evidence")))
-    lowered = ocr_text.casefold()
+    lowered = re.sub(r"\s+", " ", ocr_text.casefold())
     def grounded(items: tuple[str, ...]) -> bool:
-        return bool(items) and all(item.casefold() in lowered for item in items)
+        return bool(items) and all(
+            re.sub(r"\s+", " ", item.casefold()).strip() in lowered
+            for item in items
+        )
     if basis != UNKNOWN and (confidence < 0.75 or not grounded(evidence)):
         basis, confidence, evidence = UNKNOWN, 0.0, ()
     if currency != UNKNOWN and (currency_confidence < 0.75 or not grounded(currency_evidence)):

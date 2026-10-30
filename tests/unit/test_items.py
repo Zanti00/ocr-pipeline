@@ -245,3 +245,49 @@ class TestLooksLikeStoreCode:
         assert not looks_like_store_code("SALAD")
         assert not looks_like_store_code("Chickenjoy bucket")
         assert not looks_like_store_code("SMART DW P-LEMON")
+
+
+class TestInlineUnitAndLineTotalAndTaxFlags:
+    def test_inline_at_unit_price_and_line_total(self):
+        items = parse_items(_lines(
+            "Details",
+            "Burger Meal 2 @ 45.00 90.00 V",
+            "Subtotal 90.00",
+        ))
+        assert len(items) == 1
+        assert items[0].name == "Burger Meal"
+        assert items[0].quantity == 2
+        assert items[0].price == 90.00
+
+    def test_split_line_at_symbol_quantity_before_price(self):
+        items = parse_items(_lines(
+            "2 @ 14.75",
+            "29.50 V",
+            "4800361415347 NSCFORGTP52",
+            "Subtotal 29.50",
+        ))
+        assert len(items) == 1
+        assert items[0].quantity == 2
+        assert items[0].price == 29.50
+        assert "NSCFORGTP52" in items[0].full_name
+
+    def test_short_receipt_near_reconciliation_and_unit_price_basis_selection(self):
+        # 4 items (under the old 20-item floor) within 2% of subtotal
+        items = [
+            ExtractedItem(name=f"Item {i}", quantity=1, price=25.0)
+            for i in range(4)
+        ]
+        scan = reconcile_items(items, {"net_sales": 102.0})
+        assert scan.near_reconciled is True
+        assert scan.price_basis == "line_total"
+        assert len(scan.payload()) == 4
+
+    def test_unreconciled_unit_price_basis_still_multiplies_in_payload(self):
+        # Printed figure is unit price (3 x 50.00 = 150.00), target is 160.00 (>3% diff)
+        # unit_total (150) is much closer to 160 than line_total (50)
+        items = [ExtractedItem(name="Pork Bento", quantity=3, price=50.00)]
+        scan = reconcile_items(items, {"net_sales": 160.00})
+        assert scan.reconciled is False
+        assert scan.price_basis == "unit_price"
+        assert scan.payload()[0]["price"] == 150.00
+

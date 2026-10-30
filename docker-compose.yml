@@ -93,6 +93,8 @@ services:
     volumes:
       - ocr_ollama_data:/root/.ollama
       - ./scripts/ollama-entrypoint.sh:/ollama-entrypoint.sh
+    environment:
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3:1.7b}
     entrypoint: ["/bin/bash", "/ollama-entrypoint.sh"]
     networks:
       - ocr_network

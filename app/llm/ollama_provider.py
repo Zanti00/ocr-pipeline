@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -35,6 +36,8 @@ EXTRACTION_TOKEN_LIMIT = 768
 CONTEXT_HEAD_CHARS = 3500
 CONTEXT_TAIL_CHARS = 2500
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
 
 def _bound_context(ocr_text: str) -> str:
     """Keep the receipt header and the totals region, drop the long middle body."""
@@ -67,6 +70,7 @@ class OllamaProvider(LLMProvider):
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "think": False,
             "format": "json",
             "keep_alive": settings.ollama_keep_alive,
             "options": {
@@ -99,7 +103,7 @@ class OllamaProvider(LLMProvider):
 
     @staticmethod
     def _parse_json(raw: str) -> dict[str, Any]:
-        text = (raw or "").strip()
+        text = _THINK_BLOCK_RE.sub("", (raw or "")).strip()
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:

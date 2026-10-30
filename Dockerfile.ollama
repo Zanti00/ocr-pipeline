@@ -1,5 +1,5 @@
-# Local Ollama LLM container used by the OCR pipeline (demo highlight, qwen2.5:1.5b).
-# The model (~1 GB) is pulled from the registry on first container start, so the
+# Local Ollama LLM container used by the OCR pipeline (demo highlight, qwen3:1.7b).
+# The model (~1.4 GB) is pulled from the registry on first container start, so the
 # first inference is slow — keep this app at minReplicas 1 and warm it up early.
 FROM ollama/ollama
 

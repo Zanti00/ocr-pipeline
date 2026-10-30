@@ -262,9 +262,9 @@ def _best_items(bundle: OcrBundle, money: MoneyResult, tax_basis: str = "unknown
     # Many POS slips print no subtotal at all - receipt 11 goes straight from the
     # item lines to TAX and TOTAL. Without a target the item sum cannot be checked
     # and every row is discarded, so the subtotal implied by the total is offered
-    # as a fallback candidate.
+    # as a fallback candidate even when tax_basis is unresolved.
     total = money.get("total_amount")
-    if total is not None and tax_basis in ("exclusive", "inclusive"):
+    if total is not None:
         implied = round(
             total - (money.get("tax_amount") or 0.0)
             - (money.get("service_charge") or 0.0), 2
@@ -276,8 +276,17 @@ def _best_items(bundle: OcrBundle, money: MoneyResult, tax_basis: str = "unknown
     best: ItemScan | None = None
     for reading in bundle.all_readings:
         scan = reconcile_items(parse_items(reading.lines), targets)
-        rank = (1 if scan.reconciled else 0, scan.count)
-        if best is None or rank > (1 if best.reconciled else 0, best.count):
+        rank = (
+            1 if scan.reconciled else 0,
+            1 if scan.near_reconciled else 0,
+            scan.count,
+        )
+        best_rank = (
+            (1 if best.reconciled else 0, 1 if best.near_reconciled else 0, best.count)
+            if best is not None
+            else (-1, -1, -1)
+        )
+        if best is None or rank > best_rank:
             best = scan
         if scan.reconciled:
             break  # an arithmetically consistent reading is good enough

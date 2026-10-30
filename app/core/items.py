@@ -53,14 +53,15 @@ ITEM_NOISE_PATTERNS = (
 )
 _ITEM_NOISE_RE = re.compile("|".join(ITEM_NOISE_PATTERNS), re.IGNORECASE)
 
-_LEADING_QUANTITY_RE = re.compile(r"^\s*(\d{1,3})\s*(?:x|pc|pcs|pieces)?\s+(?=\S)")
+_LEADING_QUANTITY_RE = re.compile(r"^\s*(\d{1,3})\s*(?:[xX×@*]|pc|pcs|pieces)?\s+(?=\S)")
 _UPC_PREFIX_RE = re.compile(r"^\s*(?:\d{8,14}|[A-Za-z0-9]{2,6}\d{7,14})\s+")
-# 'name ... x2' and, more importantly, the BIR form layout which prints the
+# 'name ... x2', 'name ... 2 @', and the BIR form layout which prints the
 # quantity in its own column immediately left of the amount: 'Bond Paper 2 490.00'.
 # Without this the quantity silently defaults to 1 on every form receipt.
 _TRAILING_QUANTITY_RE = re.compile(
-    r"(?:\s+x\s*(\d{1,3})|\s+(\d{1,3}))\s*$", re.IGNORECASE
+    r"(?:\s+[xX×@*]\s*(\d{1,3})|\s+(\d{1,3})\s*[xX×@*]?)\s*$", re.IGNORECASE
 )
+_TRAILING_TAX_FLAG_RE = re.compile(r"\s+(?:[VTEZ]|NV|VAT)\s*$", re.IGNORECASE)
 
 MAX_NAME_LENGTH = 255
 MAX_ITEMS = getattr(settings, "ocr_max_items", 250)
@@ -245,7 +246,7 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
                     pending.quantity = max(1, int(q_digits))
                     continue
 
-            # Check for split-line grocery format where quantity precedes price: '2 x 14.75'
+            # Check for split-line grocery format where quantity precedes price: '2 x 14.75' or '2 @ 14.75'
             qty_price_match = _QUANTITY_LINE_WITH_PRICE_RE.match(text)
             if qty_price_match:
                 q_digits = qty_price_match.group(1).replace("I", "1").replace("l", "1")
@@ -255,7 +256,7 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
                 continue
 
             _flush_pending()
-            item = _build_item(remainder, money[-1], line_text=text)
+            item = _build_item(remainder, money[-1], line_text=text, all_money=money)
             if item is not None:
                 if pending_qty_prefix is not None:
                     q_val, u_val = pending_qty_prefix
@@ -289,27 +290,31 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
     return items
 
 
-_QUANTITY_MARKER_RE = re.compile(r"^\s*[0-9Il]{1,3}\s*[xX×]\s*$")
-_QUANTITY_DIGITS_RE = re.compile(r"^\s*(\d{1,3})\s*[xX×]\s*$")
+_QUANTITY_MARKER_RE = re.compile(r"^\s*[0-9Il]{1,3}\s*[xX×@*]\s*$")
+_QUANTITY_DIGITS_RE = re.compile(r"^\s*(\d{1,3})\s*[xX×@*]\s*$")
 _QUANTITY_LINE_WITH_PRICE_RE = re.compile(
-    r"^\s*([0-9Il]{1,3})\s*[xX×]\s*(\d{1,3}(?:[,.]\d{2})?)\s*$"
+    r"^\s*([0-9Il]{1,3})\s*[xX×@*]\s*(\d{1,3}(?:[,.]\d{2})?)\s*$"
 )
 
 
 def _is_quantity_line(remainder: str) -> bool:
-    """Is this money-line remainder a bare '1 ×' quantity marker?"""
+    """Is this money-line remainder a bare '1 ×' or '1 @' quantity marker?"""
     return bool(_QUANTITY_MARKER_RE.match(remainder))
 
 
 def _quantity_of(remainder: str) -> int | None:
-    match = _QUANTITY_DIGITS_RE.match(remainder)
+    cleaned = remainder.replace("I", "1").replace("l", "1")
+    match = _QUANTITY_DIGITS_RE.match(cleaned)
     if match:
         return max(1, int(match.group(1)))
     return 1
 
 
 def _build_item(
-    remainder: str, money_token: str, line_text: str = ""
+    remainder: str,
+    money_token: str,
+    line_text: str = "",
+    all_money: list[str] | None = None,
 ) -> ExtractedItem | None:
     """Build an item from a line with its money words already removed."""
     price = normalize_money(money_token)
@@ -317,6 +322,19 @@ def _build_item(
         return None
 
     quantity = 1
+    inferred_qty: int | None = None
+    if all_money and len(all_money) >= 2:
+        prev_price = normalize_money(all_money[-2])
+        if prev_price and prev_price > 0 and price >= prev_price:
+            ratio = price / prev_price
+            rounded_ratio = round(ratio)
+            if 1 <= rounded_ratio <= 999 and abs(rounded_ratio * prev_price - price) <= 0.05:
+                inferred_qty = int(rounded_ratio)
+
+    # Strip trailing POS VAT flag ('Burger 2 @ V' -> 'Burger 2 @') only when real words precede it
+    stripped_rem = _TRAILING_TAX_FLAG_RE.sub("", remainder).strip()
+    if stripped_rem and any(ch.isalpha() for ch in stripped_rem):
+        remainder = stripped_rem
 
     match = _LEADING_QUANTITY_RE.match(remainder)
     if match:
@@ -328,8 +346,13 @@ def _build_item(
             digits = trailing.group(1) or trailing.group(2)
             quantity = max(1, int(digits))
             remainder = remainder[: trailing.start()]
+        elif inferred_qty is not None:
+            quantity = inferred_qty
 
     name = _clean_name(remainder)
+    if not name and inferred_qty is not None:
+        # Handle '2 x 14.75 29.50 V' where the name sits on the following barcode line
+        name = "V"
     if not name:
         return None
     return ExtractedItem(
@@ -348,8 +371,12 @@ def _clean_name(text: str) -> str:
     accompanying text is a summary figure rather than a product line.
     """
     cleaned = re.sub(r"[|_]+", " ", text)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:;-*\\/")
-    cleaned = _UPC_PREFIX_RE.sub("", cleaned).strip(" .,:;-*\\/")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,:;-*\\/@")
+    cleaned = _UPC_PREFIX_RE.sub("", cleaned).strip(" .,:;-*\\/@")
+    # Strip trailing POS VAT flag ('Burger V' -> 'Burger') only when a real name precedes it
+    stripped_flag = _TRAILING_TAX_FLAG_RE.sub("", cleaned).strip(" .,:;-*\\/@")
+    if stripped_flag and any(ch.isalpha() for ch in stripped_flag):
+        cleaned = stripped_flag
     if not any(ch.isalpha() for ch in cleaned):
         return ""
     return cleaned[:MAX_NAME_LENGTH]
@@ -450,8 +477,8 @@ def reconcile_items(
                 )
                 return scan
 
-    # Long receipt fuzzy / near-reconciliation fallback (>= 20 items within 3% discrepancy)
-    if len(items) >= 20:
+    # Near-reconciliation fallback (>= 3 items within 3% discrepancy)
+    if len(items) >= 3:
         for basis, total in (("line_total", line_total), ("unit_price", unit_total)):
             for name, target in candidates.items():
                 if target is not None and target > 0 and abs(total - target) / target <= 0.03:
@@ -467,7 +494,23 @@ def reconcile_items(
                     )
                     return scan
 
-    scan.total = line_total
+    # Even when unreconciled, pick the price_basis that is closer to the target
+    # so unit-price receipts still multiply price * quantity in payload().
+    best_diff: float | None = None
+    best_basis = "none"
+    best_total = line_total
+    for basis, total in (("line_total", line_total), ("unit_price", unit_total)):
+        for target in candidates.values():
+            if target is not None and target > 0:
+                diff = abs(total - target)
+                if best_diff is None or diff < best_diff:
+                    best_diff = diff
+                    if basis == "unit_price" and diff < abs(line_total - target):
+                        best_basis = basis
+                        best_total = unit_total
+
+    scan.price_basis = best_basis
+    scan.total = best_total
     scan.notes.append(
         f"items do not reconcile: line_total={line_total:.2f}, "
         f"unit_total={unit_total:.2f}, targets="

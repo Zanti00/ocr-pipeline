@@ -141,3 +141,32 @@ def test_bound_context_keeps_header_and_tail():
     assert "FOOTER 99.95" in bounded
     assert len(bounded) < len(text)
     assert _bound_context("") == ""
+
+
+def test_qwen3_think_block_is_stripped_before_json_parsing():
+    from app.llm.ollama_provider import OllamaProvider
+    raw = (
+        "<think>\nThe user wants financial semantics in JSON.\n</think>\n"
+        '{"tax_basis": "inclusive", "confidence": 0.92}'
+    )
+    parsed = OllamaProvider._parse_json(raw)
+    assert parsed["tax_basis"] == "inclusive"
+    assert parsed["confidence"] == 0.92
+
+
+def test_semantics_evidence_grounding_normalizes_whitespace():
+    raw = {
+        "tax_basis": "inclusive",
+        "confidence": 0.9,
+        "evidence": ["VAT INCLUSIVE"],
+        "currency": "PHP",
+        "currency_confidence": 0.9,
+        "currency_evidence": ["PHP"],
+    }
+    sem = validate_financial_semantics(
+        raw, "Total Sales (VAT   INCLUSIVE)   PHP 250.00"
+    )
+    assert sem is not None
+    assert sem.tax_basis == "inclusive"
+    assert sem.currency == "PHP"
+
