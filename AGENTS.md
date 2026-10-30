@@ -39,7 +39,7 @@ If the prompt or the AI model/agent requires context, constraints, or schemas fr
 | **Message Broker / Cache** | Redis                                                       | Celery broker; file-hash caching (`ocr:file_hash:<sha256>`, TTL 90d)             |
 | **NoSQL Database**         | MongoDB (`motor`)                                           | Job status, raw OCR results, extracted fields, BIR validation, confidence scores |
 | **Vector Database**        | PostgreSQL + `pgvector` (`sqlalchemy`, `asyncpg`)           | 384-dim receipt embeddings; cosine similarity duplicate detection                |
-| **Local LLM**              | Ollama (`qwen2.5:1.5b`)                                     | Structured field extraction from raw OCR text                                    |
+| **Local LLM**              | Ollama (`qwen3:1.7b`)                                       | Structured field extraction from raw OCR text                                    |
 | **OCR Engine**             | PaddleOCR + Tesseract (`paddleocr`, `pytesseract`) + OpenCV | Image pre-processing + PaddleOCR primary + Tesseract fallback                    |
 | **Embeddings**             | Sentence-Transformers (`all-MiniLM-L6-v2`)                  | 384-dim vector generation                                                        |
 | **ML Anomaly Model**       | Scikit-learn (`RandomForestClassifier`)                     | Receipt anomaly risk scoring (0.0–1.0)                                           |
@@ -51,7 +51,7 @@ If the prompt or the AI model/agent requires context, constraints, or schemas fr
 ## Architecture & Infrastructure
 
 - Docker Compose (`docker-compose.yml`) orchestrates all services.
-- `ocr_ollama` container auto-pulls `qwen2.5:1.5b` via `scripts/ollama-entrypoint.sh` on first start.
+- `ocr_ollama` container auto-pulls `qwen3:1.7b` via `scripts/ollama-entrypoint.sh` on first start.
 - `ocr_api` caches `all-MiniLM-L6-v2` during image build via `scripts/download_model.py`.
 - All containers communicate over a private Docker bridge network (`ocr_network`).
 - An **external** Docker network `shared-capstone-network` is required so SERMS and PRS can route callbacks.
@@ -97,9 +97,9 @@ Each `process_receipt_task` Celery job runs these stages in order:
 1. **Download & Ingest** — fetch file from `file_url` or parallel `file_urls` (multi-segment receipts up to 6); 3-zone blur verification for tall receipts
 2. **Pre-process & Strip Tiling** — OpenCV (grayscale, deskew, adaptive thresholding, denoising); tall single-image receipts (`height >= 1800` & `aspect >= 2.8`) automatically sliced into overlapping strips
 3. **OCR & Seam Stitching** — PaddleOCR extracts primary text & geometry; Tesseract runs fallback passes; middle item segments bypass pool via density-aware fast path; multi-segment/strip texts merged via seam deduplication and coordinate translation; text quality scored (`app/core/textquality.py`)
-4. **LLM extraction** — Ollama `qwen2.5:1.5b` parses vendor, date, total, VAT, TIN, invoice number, line items, category (prompt bounded to top/bottom contexts on long receipts)
+4. **LLM extraction** — Ollama `qwen3:1.7b` (non-thinking JSON mode, `num_ctx=2048`) parses vendor, location, tax basis, currency, and subtotal verification (prompt bounded to top/bottom contexts on long receipts)
 5. **BIR validation** — `app/core/bir_validator.py` validates TIN format, VAT classification
-6. **Confidence scoring & Reconciliation** — `app/core/confidence.py` computes composite score (≥ 0.75 = acceptable); long receipts (≥ 20 items) near-reconciled within 3% emit line items with score capped at 0.79 (`REASON_NEAR_RECONCILED`)
+6. **Confidence scoring & Reconciliation** — `app/core/confidence.py` computes composite score (≥ 0.75 = acceptable); receipts (≥ 3 items) near-reconciled within 3% emit line items with score capped at 0.79 (`REASON_NEAR_RECONCILED`)
 7. **Anomaly risk scoring** — `RandomForestClassifier` assigns a risk score (0.0–1.0) and category (`Low` / `Medium` / `High Risk`)
 8. **Embedding** — `all-MiniLM-L6-v2` generates a 384-dim vector from compacted receipt text; stored in PostgreSQL (`receipt_embeddings`)
 9. **Duplicate detection** — cosine similarity search within a 90-day window; threshold `0.85`

@@ -17,14 +17,14 @@ class Settings(BaseSettings):
 
     # Ollama config
     ollama_base_url: str
-    ollama_model: str
+    ollama_model: str = "qwen3:1.7b"
     llm_provider: str = "ollama"
     # How long the model stays resident in memory after a call. -1 keeps the
     # model permanently resident in memory to eliminate cold reload latency.
     ollama_keep_alive: str = "-1"
-    # Explicit context window (4096 gives >2x headroom over the 6000-char prompt cap
-    # while halving KV cache allocation overhead).
-    ollama_num_ctx: int = 4096
+    # Explicit context window (2048 comfortably covers the 6000-char prompt cap
+    # while keeping qwen3:1.7b resident RAM under ~1.55 GB inside a 2 GB limit).
+    ollama_num_ctx: int = 2048
     # Timeout for optional LLM assists; fail soft to deterministic baseline
     ollama_assist_timeout: float = 20.0
     # Line items LLM normalization toggle (skips redundant 20-85s batch LLM call on CPU)

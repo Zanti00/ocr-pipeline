@@ -88,10 +88,10 @@ All observability is currently via **Docker container logs** and **MongoDB job r
 
 - **Dependency updates:** Regularly run `pip list --outdated` inside the container and update `pyproject.toml`. Always re-run `docker compose up --build` and `pytest` after updates.
 - **Worker process pre-warming:** Celery worker processes automatically initialize PaddleOCR, Sentence-Transformers (`all-MiniLM-L6-v2`), and category prototype embeddings during worker process initialization (`@worker_process_init.connect`). This eliminates cold-start penalties on initial OCR tasks.
-- **Ollama model residency:** Configured via `OLLAMA_KEEP_ALIVE=-1` and auto-warmed via `scripts/ollama-entrypoint.sh` upon startup. This keeps Qwen2.5 1.5B resident in memory indefinitely, preventing costly CPU re-prefill and KV-cache rebuilds between jobs.
+- **Ollama model residency:** Configured via `OLLAMA_KEEP_ALIVE=-1` and auto-warmed via `scripts/ollama-entrypoint.sh` upon startup. This keeps Qwen3 1.7B resident in memory indefinitely, preventing costly CPU re-prefill and KV-cache rebuilds between jobs.
 - **Alembic migrations:** Any schema change to the PostgreSQL `receipt_embeddings` table must be applied via Alembic before deploying new code: `alembic upgrade head`.
 - **MongoDB storage:** Monitor the `ocr_mongo_data` volume growth; the `jobs` collection accumulates all OCR results.
-- **Ollama model management:** Qwen2.5 1.5B is pulled automatically by `scripts/ollama-entrypoint.sh` on first start. To upgrade the model, update the entrypoint script and re-deploy.
+- **Ollama model management:** Qwen3 1.7B (`qwen3:1.7b`) is pulled automatically by `scripts/ollama-entrypoint.sh` on first start. To upgrade the model, update `OLLAMA_MODEL` or the entrypoint script and re-deploy.
 - **API key rotation:** SERMS and PRS API keys are stored in `.env`. Rotate on a regular schedule and notify the consuming teams before rotation.
 
 ---
