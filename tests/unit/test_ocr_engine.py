@@ -57,55 +57,49 @@ async def test_read_pooled_can_select_tesseract_and_preserve_all_candidates(monk
         "Paddle total 10.00", 4.0, 0.99,
         engine="paddle", variant="source", psm=0,
     )
-    tesseract = reading("Tesseract total 10.00", 6.0, 0.88, variant="contrast")
-    alternate = reading("Other total 10.00", 5.5, 0.90, variant="flat", psm=4)
+    tesseract = reading("Tesseract total 10.00", 6.0, 0.88, variant="clean")
 
     monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: paddle)
-    
-    async def mock_read_best(*args, **kwargs):
-        return (tesseract, [tesseract, alternate])
-        
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
+    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": tesseract)
 
-    bundle = await ocr_engine.read_pooled(object(), pool_size=3)
+    bundle = await ocr_engine.read_pooled(object(), pool_size=2)
 
     assert bundle.primary is tesseract
     assert bundle.primary.engine == "tesseract"
-    assert bundle.all_readings == [paddle, tesseract, alternate]
+    assert bundle.all_readings == [paddle, tesseract]
     assert bundle.primary not in bundle.supporting
-    assert len(bundle.supporting) == 2
+    assert bundle.supporting == [paddle]
 
 
 @pytest.mark.asyncio
-async def test_read_pooled_early_exits_when_fast_path_scores_high(monkeypatch):
-    fast = reading("Fast total 10.00", 7.5, 0.90)
-    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": fast)
-    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: None)
+async def test_read_pooled_early_exits_when_paddle_scores_high(monkeypatch):
+    paddle = reading(
+        "Paddle total 10.00", 7.5, 0.90,
+        engine="paddle", variant="source", psm=0,
+    )
+    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: paddle)
 
-    async def mock_read_best(*args, **kwargs):
-        raise AssertionError("full pool must not run on fast-path exit")
+    def mock_read_fast(*args, **kwargs):
+        raise AssertionError("Tesseract must not run when Paddle fast path satisfies")
 
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
+    monkeypatch.setattr(ocr_engine, "read_fast", mock_read_fast)
 
     bundle = await ocr_engine.read_pooled(object())
 
     assert bundle.early_exit is True
-    assert bundle.primary is fast
-    assert bundle.all_readings == [fast]
+    assert bundle.primary is paddle
+    assert bundle.all_readings == [paddle]
 
 
 @pytest.mark.asyncio
-async def test_read_pooled_escalates_when_fast_path_scores_low(monkeypatch):
-    weak = reading("Weak noise", 2.0, 0.30)
-    tesseract = reading("Tesseract total 10.00", 6.0, 0.88)
-    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": weak)
-    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: reading(
-        "Paddle total 10.00", 5.0, 0.95, engine="paddle", variant="source", psm=0))
-
-    async def mock_read_best(*args, **kwargs):
-        return (tesseract, [tesseract])
-
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
+async def test_read_pooled_escalates_when_paddle_scores_low(monkeypatch):
+    weak_paddle = reading(
+        "Weak noise", 2.0, 0.30,
+        engine="paddle", variant="source", psm=0,
+    )
+    tesseract = reading("Tesseract total 10.00", 6.0, 0.88, variant="clean")
+    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: weak_paddle)
+    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": tesseract)
 
     bundle = await ocr_engine.read_pooled(object(), pool_size=2)
 
@@ -115,24 +109,21 @@ async def test_read_pooled_escalates_when_fast_path_scores_low(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_read_pooled_falls_back_to_pool_when_fast_path_fails(monkeypatch):
-    def fail_fast(image, lang="eng"):
-        raise RuntimeError("preprocessing broke")
+async def test_read_pooled_falls_back_to_tesseract_when_paddle_fails(monkeypatch):
+    tesseract = reading("Tesseract total 10.00", 6.0, 0.88, variant="clean")
 
-    tesseract = reading("Tesseract total 10.00", 6.0, 0.88)
-    monkeypatch.setattr(ocr_engine, "read_fast", fail_fast)
-    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: reading(
-        "Paddle total 10.00", 5.0, 0.95, engine="paddle", variant="source", psm=0))
+    def fail_paddle(image):
+        raise RuntimeError("Paddle model unavailable")
 
-    async def mock_read_best(*args, **kwargs):
-        return (tesseract, [tesseract])
-
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
+    monkeypatch.setattr(ocr_engine, "read_paddle", fail_paddle)
+    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": tesseract)
 
     bundle = await ocr_engine.read_pooled(object(), pool_size=2)
 
-    assert bundle.early_exit is False
     assert bundle.primary is tesseract
+    assert bundle.primary.engine == "tesseract"
+    assert bundle.all_readings == [tesseract]
+    assert bundle.supporting == []
 
 
 def test_fast_path_eligible_threshold():
@@ -143,190 +134,47 @@ def test_fast_path_eligible_threshold():
 
 
 @pytest.mark.asyncio
-async def test_read_pooled_early_exits_via_fallback_when_fast_path_scores_low(monkeypatch):
-    weak = reading("Weak noise", 2.0, 0.30)
-    fallback = reading("Fallback total 10.00", 7.5, 0.90, variant="fast_alt", psm=11)
-    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": weak)
-    monkeypatch.setattr(
-        ocr_engine, "read_fast_fallback", lambda image, lang="eng": fallback
-    )
-    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: None)
-
-    async def mock_read_best(*args, **kwargs):
-        raise AssertionError("full pool must not run when fallback satisfies")
-
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
-
-    bundle = await ocr_engine.read_pooled(object())
-
-    assert bundle.early_exit is True
-    assert bundle.primary is fallback
-    assert bundle.all_readings == [fallback]
-
-
-@pytest.mark.asyncio
-async def test_read_pooled_escalates_when_fallback_also_scores_low(monkeypatch):
-    weak = reading("Weak noise", 2.0, 0.30)
-    weak_fallback = reading("Weak noise too", 1.5, 0.25, variant="fast_alt", psm=11)
-    tesseract = reading("Tesseract total 10.00", 6.0, 0.88)
-    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": weak)
-    monkeypatch.setattr(
-        ocr_engine, "read_fast_fallback", lambda image, lang="eng": weak_fallback
-    )
-    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: reading(
-        "Paddle total 10.00", 5.0, 0.95, engine="paddle", variant="source", psm=0))
-
-    async def mock_read_best(*args, **kwargs):
-        return (tesseract, [tesseract])
-
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
-
-    bundle = await ocr_engine.read_pooled(object(), pool_size=2)
-
-    assert bundle.early_exit is False
-    assert bundle.primary is tesseract
-    assert len(bundle.all_readings) == 2
-
-
-@pytest.mark.asyncio
-async def test_read_pooled_escalates_when_fallback_fails(monkeypatch):
-    weak = reading("Weak noise", 2.0, 0.30)
-
-    def fail_fallback(image, lang="eng"):
-        raise RuntimeError("flat rendering broke")
-
-    tesseract = reading("Tesseract total 10.00", 6.0, 0.88)
-    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": weak)
-    monkeypatch.setattr(ocr_engine, "read_fast_fallback", fail_fallback)
-    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: reading(
-        "Paddle total 10.00", 5.0, 0.95, engine="paddle", variant="source", psm=0))
-
-    async def mock_read_best(*args, **kwargs):
-        return (tesseract, [tesseract])
-
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
-
-    bundle = await ocr_engine.read_pooled(object(), pool_size=2)
-
-    assert bundle.early_exit is False
-    assert bundle.primary is tesseract
-
-
-@pytest.mark.asyncio
-async def test_read_pooled_falls_back_to_tesseract_when_paddle_fails(monkeypatch):
-    tesseract = reading("Tesseract total 10.00", 6.0, 0.88)
-
-    def fail_paddle(image):
-        raise RuntimeError("model unavailable")
-
-    monkeypatch.setattr(ocr_engine, "read_paddle", fail_paddle)
-    
-    async def mock_read_best(*args, **kwargs):
-        return (tesseract, [tesseract])
-        
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
-
-    bundle = await ocr_engine.read_pooled(object(), pool_size=2)
-
-    assert bundle.primary is tesseract
-    assert bundle.primary.engine == "tesseract"
-    assert bundle.supporting == []
-
-
-@pytest.mark.asyncio
 async def test_read_pooled_does_not_duplicate_identical_text(monkeypatch):
     paddle = reading(
         "Same total 10.00", 5.0, 0.95,
         engine="paddle", variant="source", psm=0,
     )
-    tesseract = reading("Same total 10.00", 5.0, 0.90)
-    alternate = reading("Different total 10.00", 4.0, 0.80, variant="flat")
+    tesseract = reading("Same total 10.00", 5.0, 0.90, variant="clean")
 
     monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: paddle)
-    
-    async def mock_read_best(*args, **kwargs):
-        return (tesseract, [tesseract, alternate])
-        
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
+    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": tesseract)
 
-    bundle = await ocr_engine.read_pooled(object(), pool_size=3)
+    bundle = await ocr_engine.read_pooled(object(), pool_size=2)
 
     assert bundle.combined_text.count("Same total 10.00") == 1
-    assert alternate in bundle.supporting
+    assert bundle.supporting == []
 
 
-@pytest.mark.asyncio
-async def test_read_best_filters_variants_from_settings(monkeypatch):
-    from app.config import settings
+def test_read_paddle_caches_reading_on_image():
+    from PIL import Image
 
-    built = [
-        type("V", (), {"label": "raw", "image": None})(),
-        type("V", (), {"label": "flat", "image": None})(),
-        type("V", (), {"label": "clean", "image": None})(),
-        type("V", (), {"label": "contrast", "image": None})(),
-        type("V", (), {"label": "sauvola", "image": None})(),
-    ]
+    call_count = 0
 
-    monkeypatch.setattr(ocr_engine, "build_variants", lambda image: built)
-    monkeypatch.setattr(
-        settings, "ocr_pool_variants", "raw,flat,clean",
-        raising=False,
-    )
+    class FakePredictEngine:
+        def predict(self, img_array, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return [{
+                "rec_texts": ["Total 10.00"],
+                "rec_scores": [0.99],
+                "rec_boxes": [[[0, 0], [10, 0], [10, 10], [0, 10]]],
+            }]
 
-    def read_variant(image, psm, lang="eng"):
-        return reading("text", 1.0, 0.5)
-
-    monkeypatch.setattr(ocr_engine, "read_variant", read_variant)
-
-    _, candidates = await ocr_engine.read_best(object(), psms=(6,))
-
-    labels = {c.variant for c in candidates}
-    assert labels == {"raw", "flat", "clean"}
-
-
-@pytest.mark.asyncio
-async def test_read_best_keeps_all_variants_when_settings_say_all(monkeypatch):
-    from app.config import settings
-
-    built = [
-        type("V", (), {"label": "raw", "image": None})(),
-        type("V", (), {"label": "sauvola", "image": None})(),
-    ]
-
-    monkeypatch.setattr(ocr_engine, "build_variants", lambda image: built)
-    monkeypatch.setattr(settings, "ocr_pool_variants", "all", raising=False)
-
-    def read_variant(image, psm, lang="eng"):
-        return reading("text", 1.0, 0.5)
-
-    monkeypatch.setattr(ocr_engine, "read_variant", read_variant)
-
-    _, candidates = await ocr_engine.read_best(object(), psms=(6,))
-
-    assert {c.variant for c in candidates} == {"raw", "sauvola"}
-
-
-@pytest.mark.asyncio
-async def test_read_pooled_resolves_psms_from_settings(monkeypatch):
-    from app.config import settings
-
-    fast = reading("Fast total 10.00", 7.5, 0.90)
-    monkeypatch.setattr(ocr_engine, "read_fast", lambda image, lang="eng": fast)
-    monkeypatch.setattr(ocr_engine, "read_paddle", lambda image: reading(
-        "Paddle total 10.00", 5.0, 0.95, engine="paddle", variant="source", psm=0))
-    monkeypatch.setattr(settings, "ocr_pool_psms", "6,11", raising=False)
-
-    captured = {}
-
-    async def mock_read_best(*args, **kwargs):
-        captured["psms"] = kwargs.get("psms")
-        return (fast, [fast])
-
-    monkeypatch.setattr(ocr_engine, "read_best", mock_read_best)
-
-    await ocr_engine.read_pooled(object(), pool_size=2, fast_path=False)
-
-    assert captured["psms"] == (6, 11)
+    img = Image.new("RGB", (200, 200), color="white")
+    orig_engine = ocr_engine._get_paddle_ocr
+    try:
+        ocr_engine._get_paddle_ocr = lambda: FakePredictEngine()
+        res1 = ocr_engine.read_paddle(img)
+        res2 = ocr_engine.read_paddle(img)
+        assert res1 is res2
+        assert call_count == 1
+    finally:
+        ocr_engine._get_paddle_ocr = orig_engine
 
 
 def test_supporting_readings_drop_far_weaker_candidates():

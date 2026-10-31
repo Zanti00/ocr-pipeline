@@ -1,9 +1,8 @@
 """Receipt OCR candidate generation and selection.
 
-The OCR stage runs PaddleOCR once and Tesseract across preprocessing variants and
-page-segmentation modes. Their readings are scored using receipt-aware anchors;
-the strongest existing candidate becomes primary while all successful readings
-remain available for downstream reconciliation.
+The OCR stage runs PaddleOCR as the primary deep-learning pass on the upright image.
+If the fast-path eligibility check fails or downstream extraction does not reconcile,
+the pipeline escalates to a single-pass OpenCV + Tesseract fallback.
 """
 
 from __future__ import annotations
@@ -15,14 +14,14 @@ import re
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pytesseract
 from PIL import Image
 
 from app.core.anchors import AnchorScore, score_text
-from app.core.preprocessing import Variant, build_variants, correct_orientation
+from app.core.preprocessing import correct_orientation, preprocess_image
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Tesseract fallback when an image has not yet been rebuilt with PaddleOCR.
 try:
     from paddleocr import PaddleOCR
-except Exception as exc:  # pragma: no cover - depends on the runtime image
+except Exception as exc:  # pragma: no cover - depends on the runtime image # noqa: BLE001
     PaddleOCR = None  # type: ignore[assignment]
     logger.warning("PaddleOCR unavailable; using Tesseract fallback: %s", exc)
 
@@ -65,18 +64,15 @@ def _get_paddle_ocr():
         except (TypeError, ValueError):
             # PaddleOCR 2.x does not know the 3.x pipeline options.
             paddle_ocr = PaddleOCR(use_angle_cls=True, lang="en")
-    except Exception as exc:  # pragma: no cover - depends on runtime/model
+    except Exception as exc:  # pragma: no cover - depends on runtime/model # noqa: BLE001
         logger.warning("PaddleOCR initialization failed; using Tesseract fallback: %s", exc)
     return paddle_ocr
 
-DEFAULT_PSMS: tuple[int, ...] = (6, 4, 11)
 
-# Early-exit fast path: one cheap Tesseract pass over the untouched image can
-# satisfy most receipts. When its anchor score is too weak, a second cheap pass
-# over the ``flat`` rendering at PSM 11 gets one more try before the full
-# Tesseract pool (5 variants x PSMs, see OCR_POOL_VARIANTS/OCR_POOL_PSMS) plus
-# Paddle runs, so hard cases keep the accuracy of the pooled path while easy
-# ones finish in seconds.
+# Fast-path eligibility and fallback settings.
+# Clean receipts pass PaddleOCR and clear FAST_PATH_ANCHOR_SCORE on the native
+# upright image (zero Tesseract passes). Receipts that fail this gate escalate
+# to a single-pass Tesseract reading over the OpenCV-preprocessed image at FAST_PATH_PSM.
 FAST_PATH_PSM = 6
 FAST_PATH_ANCHOR_SCORE = 6.0
 FAST_PATH_MAX_EDGE = 1600
@@ -232,94 +228,6 @@ class OcrBundle:
         return sum(1 for r in self.all_readings if needle in r.text)
 
 
-async def read_best(
-    image: Image.Image,
-    lang: str = "eng",
-    psms: Sequence[int] = DEFAULT_PSMS,
-    variants: Sequence[Variant] | None = None,
-) -> tuple[OcrReading, list[OcrReading]]:
-    """Try every configured Tesseract variant x PSM combination concurrently.
-
-    Runs variants in the global ocr_executor to parallelize CPU passes. When
-    ``variants`` is omitted, the full built-in variant set is filtered down to
-    ``settings.ocr_pool_variants`` ("all" keeps everything). The pool size is
-    therefore tunable via ``OCR_POOL_VARIANTS``/``OCR_POOL_PSMS`` without code
-    changes, letting operators trade accuracy for speed on hard receipts.
-    """
-    candidates: list[OcrReading] = []
-    loop = asyncio.get_running_loop()
-
-    def _build():
-        if variants is not None:
-            return variants
-        from app.config import settings
-
-        labels = [
-            label.strip()
-            for label in settings.ocr_pool_variants.split(",")
-            if label.strip()
-        ]
-        built = build_variants(image)
-        if "all" in labels:
-            return built
-        return [v for v in built if v.label in labels]
-        
-    actual_variants = await loop.run_in_executor(ocr_executor, _build)
-
-    def _run_variant(v_img, v_label, psm_val):
-        readings_cache = getattr(image, "_ocr_readings_cache", None)
-        if readings_cache is not None:
-            cached = readings_cache.get((v_label, psm_val, lang))
-            if cached is not None:
-                return OcrReading(
-                    text=cached.text,
-                    words=cached.words,
-                    confidence=cached.confidence,
-                    variant=v_label,
-                    psm=psm_val,
-                    engine=cached.engine,
-                    anchors=cached.anchors,
-                    lines=cached.lines,
-                )
-
-        reading = read_variant(v_img, psm=psm_val, lang=lang)
-        reading.variant = v_label
-        if readings_cache is not None:
-            readings_cache[(v_label, psm_val, lang)] = reading
-        elif hasattr(image, "__dict__"):
-            try:
-                image._ocr_readings_cache = {(v_label, psm_val, lang): reading}
-            except AttributeError:
-                pass
-        return reading
-
-    tasks = []
-    for variant in actual_variants:
-        for psm in psms:
-            tasks.append(
-                loop.run_in_executor(ocr_executor, _run_variant, variant.image, variant.label, psm)
-            )
-
-    # Failure strategy: if one variant fails, we ignore it and continue.
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    for i, res in enumerate(results):
-        if isinstance(res, Exception):
-            logger.warning("OCR failed for a variant: %s", res)
-        else:
-            candidates.append(res)
-
-    if not candidates:
-        raise RuntimeError("All OCR variants failed")
-
-    best = select_primary(candidates)
-    logger.info(
-        "Tesseract best candidate variant=%s psm=%s score=%.3f conf=%.3f",
-        best.variant, best.psm, best.score, best.confidence,
-    )
-    return best, candidates
-
-
 def rank_candidates(candidates: Sequence[OcrReading]) -> list[OcrReading]:
     """Rank OCR candidates without adding another OCR or extraction pass.
 
@@ -410,6 +318,10 @@ def _append_paddle_line(
 
 def read_paddle(image: Image.Image) -> OcrReading:
     """Run PaddleOCR across its legacy 2.x and pipeline 3.x APIs."""
+    cached = getattr(image, "_paddle_reading", None)
+    if cached is not None:
+        return cached
+
     engine = _get_paddle_ocr()
     if engine is None:
         raise RuntimeError("PaddleOCR is not initialized")
@@ -487,6 +399,12 @@ def read_paddle(image: Image.Image) -> OcrReading:
         lines=group_lines(words),
     )
     reading.anchors = score_text(text_content, mean)
+    try:
+        image._paddle_reading = reading
+        if upright is not image:
+            upright._paddle_reading = reading
+    except AttributeError:
+        pass
     return reading
 
 
@@ -530,49 +448,23 @@ def _supporting_readings(
 
 
 def read_fast(image: Image.Image, lang: str = "eng") -> OcrReading:
-    """Single cheap Tesseract pass for the early-exit path.
+    """Single-pass OpenCV + Tesseract reading for OCR fallback.
 
-    Runs the standard best-effort rendering once at one PSM. The full 16-pass pool
-    is only worth its cost when this pass cannot satisfy the receipt.
+    Runs best-effort OpenCV preprocessing and extracts text using Tesseract at FAST_PATH_PSM.
     """
-    from app.core.preprocessing import preprocess_image
+    cache = getattr(image, "_ocr_readings_cache", None)
+    if cache is not None and ("clean", FAST_PATH_PSM, lang) in cache:
+        return cache[("clean", FAST_PATH_PSM, lang)]
 
     prepared = preprocess_image(image)
     reading = read_variant(prepared, psm=FAST_PATH_PSM, lang=lang)
-    reading.variant = "fast"
+    reading.variant = "clean"
     if hasattr(image, "__dict__"):
         try:
-            cache = getattr(image, "_ocr_readings_cache", None)
             if cache is None:
                 cache = {}
                 image._ocr_readings_cache = cache
             cache[("clean", FAST_PATH_PSM, lang)] = reading
-        except AttributeError:
-            pass
-    return reading
-
-
-def read_fast_fallback(image: Image.Image, lang: str = "eng") -> OcrReading:
-    """Second cheap pass for the early-exit path.
-
-    Used only when ``read_fast``'s anchor score fails the gate: the ``flat``
-    rendering at PSM 11 rescues clean receipts whose single best-effort
-    rendering happens to degrade (e.g. deskew/denoise hurting that particular
-    image), without paying for the full pool. Receipts the primary fast pass
-    already satisfies never reach this pass, so behavior is unchanged there.
-    """
-    from app.core.preprocessing import build_variants
-
-    variants = {v.label: v.image for v in build_variants(image)}
-    reading = read_variant(variants["flat"], psm=11, lang=lang)
-    reading.variant = "fast_alt"
-    if hasattr(image, "__dict__"):
-        try:
-            cache = getattr(image, "_ocr_readings_cache", None)
-            if cache is None:
-                cache = {}
-                image._ocr_readings_cache = cache
-            cache[("flat", 11, lang)] = reading
         except AttributeError:
             pass
     return reading
@@ -599,101 +491,57 @@ def _fast_path_eligible(reading: OcrReading) -> bool:
 async def read_pooled(
     image: Image.Image,
     lang: str = "eng",
-    psms: Sequence[int] | None = None,
-    pool_size: int = 4,
+    pool_size: int = 2,
     fast_path: bool = True,
+    **kwargs: Any,
 ) -> OcrBundle:
-    """Run the early-exit fast pass, escalating to the full pool when needed.
+    """Run PaddleOCR primary pass, escalating to single-pass Tesseract when needed.
 
-    Fast path: one Tesseract pass over the preprocessed image. When its anchor
-    score clears ``FAST_PATH_ANCHOR_SCORE`` the bundle is returned immediately
-    with ``early_exit=True`` - the caller still runs extraction and must escalate
-    via ``read_pooled(fast_path=False)`` if extraction does not reconcile. When
-    the first pass is too weak, a second cheap pass over the ``flat`` rendering
-    at PSM 11 gets one more try before the pool.
+    Fast path: Run PaddleOCR on the upright image. When it succeeds and clears
+    ``_fast_path_eligible``, the bundle is returned immediately with
+    ``early_exit=True`` (zero Tesseract passes).
 
-    Escalation: PaddleOCR and the Tesseract variant x PSM pool run concurrently,
-    exactly as before, so hard receipts keep the full accuracy of the pooled path.
-    The pool's PSM modes and variants come from ``settings`` (env
-    ``OCR_POOL_PSMS``/``OCR_POOL_VARIANTS``) unless overridden via ``psms``.
+    Escalation: If fast_path=False, or if PaddleOCR fails or scores below the
+    fast-path threshold, run a single-pass Tesseract reading over the
+    OpenCV-preprocessed image. The readings are combined and the stronger
+    candidate becomes primary.
     """
-    if psms is None:
-        from app.config import settings
-
-        psms = tuple(
-            int(mode)
-            for mode in settings.ocr_pool_psms.split(",")
-            if mode.strip()
-        ) or DEFAULT_PSMS
     loop = asyncio.get_running_loop()
 
+    paddle_reading: OcrReading | None = None
+    try:
+        paddle_reading = await loop.run_in_executor(ocr_executor, read_paddle, image)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PaddleOCR failed; continuing to Tesseract fallback: %s", exc)
+        paddle_reading = None
+
     if fast_path:
-        try:
-            fast = await loop.run_in_executor(ocr_executor, read_fast, image, lang)
-        except Exception as exc:
-            logger.warning("Fast path failed (%s); using pooled OCR", exc)
-            fast = None
-        if fast is not None and _fast_path_eligible(fast):
+        if paddle_reading is not None and _fast_path_eligible(paddle_reading):
             logger.info(
-                "Fast path: single pass variant=%s psm=%d score=%.3f conf=%.3f",
-                fast.variant, fast.psm, fast.score, fast.confidence,
+                "Fast path: PaddleOCR score=%.3f conf=%.3f",
+                paddle_reading.score, paddle_reading.confidence,
             )
             return OcrBundle(
-                primary=fast, supporting=[], all_readings=[fast], early_exit=True
+                primary=paddle_reading,
+                supporting=[],
+                all_readings=[paddle_reading],
+                early_exit=True,
             )
-        if fast is not None:
+        if paddle_reading is not None:
             logger.info(
-                "Fast path score %.3f below %.2f; trying fallback rendering",
-                fast.score, FAST_PATH_ANCHOR_SCORE,
+                "PaddleOCR score %.3f below %.2f; escalating to Tesseract fallback",
+                paddle_reading.score, FAST_PATH_ANCHOR_SCORE,
             )
-            try:
-                fallback = await loop.run_in_executor(
-                    ocr_executor, read_fast_fallback, image, lang
-                )
-            except Exception as exc:
-                logger.warning("Fast-path fallback failed (%s); using pooled OCR", exc)
-                fallback = None
-            if fallback is not None and _fast_path_eligible(fallback):
-                logger.info(
-                    "Fast path fallback variant=%s psm=%d score=%.3f conf=%.3f",
-                    fallback.variant, fallback.psm, fallback.score, fallback.confidence,
-                )
-                return OcrBundle(
-                    primary=fallback, supporting=[], all_readings=[fallback],
-                    early_exit=True,
-                )
-            if fallback is not None:
-                logger.info(
-                    "Fast path fallback score %.3f below %.2f; escalating to pooled OCR",
-                    fallback.score, FAST_PATH_ANCHOR_SCORE,
-                )
 
     candidates: list[OcrReading] = []
+    if paddle_reading is not None:
+        candidates.append(paddle_reading)
 
-    # We can run Paddle and Tesseract best concurrently
-    paddle_task = loop.run_in_executor(ocr_executor, read_paddle, image)
-    tesseract_task = asyncio.create_task(read_best(image, lang=lang, psms=psms))
-
-    # Wait for both. If one fails, the other might succeed.
-    results = await asyncio.gather(paddle_task, tesseract_task, return_exceptions=True)
-    
-    paddle_res, tesseract_res = results[0], results[1]
-
-    if isinstance(paddle_res, Exception):
-        logger.warning("PaddleOCR failed; continuing with Tesseract: %s", paddle_res)
-    else:
-        candidates.append(paddle_res)
-        logger.info(
-            "PaddleOCR succeeded (score=%.3f, conf=%.3f)",
-            paddle_res.score,
-            paddle_res.confidence,
-        )
-
-    if isinstance(tesseract_res, Exception):
-        logger.warning("Tesseract OCR failed; continuing with PaddleOCR: %s", tesseract_res)
-    else:
-        _best_tess, tess_cands = tesseract_res
-        candidates.extend(c for c in tess_cands if c.text.strip())
+    try:
+        tesseract_reading = await loop.run_in_executor(ocr_executor, read_fast, image, lang)
+        candidates.append(tesseract_reading)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Tesseract fallback failed: %s", exc)
 
     if not candidates:
         raise RuntimeError("PaddleOCR and Tesseract produced no OCR candidates")
@@ -718,6 +566,7 @@ async def read_pooled(
         primary=primary,
         supporting=supporting,
         all_readings=candidates,
+        early_exit=False,
     )
 
 

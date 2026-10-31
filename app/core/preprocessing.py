@@ -1,31 +1,17 @@
 """Image preparation for OCR.
 
-Rather than one fixed chain, this module produces several candidate renderings
-of the same receipt. The settings that rescue a faded thermal print will blow out
-a crisp scan, so the pipeline generates variants and lets measured OCR quality
-pick the winner (see ``app.core.ocr_engine.read_best``).
-
-Stage order matters and is deliberate:
-
+Provides single best-effort OpenCV image normalization for receipt OCR:
 1. orientation      - must run first; every later stage assumes upright text
 2. perspective      - guarded; declines to warp when no confident document quad
 3. shadow removal   - divide by a blurred background estimate ("flatbed" look)
-4. upscale          - Tesseract needs roughly 300 DPI equivalent x-height
+4. upscale          - ensures text reaches sufficient x-height
 5. denoise          - bilateral, which preserves thin thermal strokes
-6. contrast (CLAHE) - after shadow removal, or it amplifies the blotches
-7. deskew           - small residual rotation left over after warping
-8. binarise         - OPTIONAL. Tesseract 5's LSTM engine often scores higher on
-                      clean grayscale, so this is offered as a variant rather
-                      than applied unconditionally.
-
-Sharpening is intentionally absent: on thermal and dot-matrix print it amplifies
-speckle into character-shaped noise.
+6. deskew           - small residual rotation left over after warping
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -43,14 +29,6 @@ MIN_QUAD_AREA_RATIO = 0.50
 # score well above 1, while noise sits near zero. Measured false positives on
 # receipts came in around 0.1-0.2.
 MIN_ORIENTATION_CONFIDENCE = 2.0
-
-
-@dataclass
-class Variant:
-    """One candidate rendering of a receipt image."""
-
-    label: str
-    image: Image.Image
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +64,7 @@ def correct_orientation(image: Image.Image) -> Image.Image:
         osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
         rotate = int(osd.get("rotate", 0)) % 360
         confidence = float(osd.get("orientation_conf", 0.0))
-    except Exception as exc:  # pragma: no cover - depends on tessdata presence
+    except Exception as exc:  # pragma: no cover - depends on tessdata presence # noqa: BLE001
         logger.debug("Orientation detection unavailable: %s", exc)
         try:
             image._ocr_upright = image
@@ -231,17 +209,8 @@ def slice_tall_image(image: Image.Image, max_aspect_ratio: float = 2.2) -> list[
 
 
 def denoise(gray: np.ndarray) -> np.ndarray:
-    """Bilateral filter: smooths noise while keeping stroke edges intact.
-
-    Replaces the previous 5x5 Gaussian blur, which was thinning and breaking
-    thermal-print strokes before they reached the recogniser.
-    """
+    """Bilateral filter: smooths noise while keeping stroke edges intact."""
     return cv2.bilateralFilter(gray, d=5, sigmaColor=50, sigmaSpace=50)
-
-
-def enhance_contrast(gray: np.ndarray, clip: float = 2.0) -> np.ndarray:
-    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
-    return clahe.apply(gray)
 
 
 def deskew(gray: np.ndarray) -> np.ndarray:
@@ -264,92 +233,34 @@ def deskew(gray: np.ndarray) -> np.ndarray:
                           borderMode=cv2.BORDER_REPLICATE)
 
 
-def binarize_sauvola(gray: np.ndarray, window: int = 25, k: float = 0.2) -> np.ndarray:
-    """Sauvola local thresholding - handles uneven exposure better than Otsu.
+def preprocess_image(image: Image.Image) -> Image.Image:
+    """Single best-effort rendering for OCR fallback.
 
-    Implemented with box filters to avoid a scikit-image dependency.
+    Returns the shadow-flattened, denoised, deskewed grayscale image
+    designed for Tesseract single-pass extraction.
     """
-    window = window if window % 2 else window + 1
-    image = gray.astype(np.float32)
-    mean = cv2.boxFilter(image, ddepth=-1, ksize=(window, window), normalize=True)
-    mean_sq = cv2.boxFilter(image * image, ddepth=-1, ksize=(window, window),
-                            normalize=True)
-    std = np.sqrt(np.clip(mean_sq - mean * mean, 0, None))
-    threshold = mean * (1.0 + k * ((std / 128.0) - 1.0))
-    return np.where(image > threshold, 255, 0).astype(np.uint8)
-
-
-# ---------------------------------------------------------------------------
-# variant construction
-# ---------------------------------------------------------------------------
-
-def build_variants(image: Image.Image) -> list[Variant]:
-    """Produce the candidate renderings the OCR stage will choose between.
-
-    ``raw`` is included on purpose: measurement showed untouched grayscale beats
-    the previous fixed chain by a wide margin, so it earns a place as a genuine
-    contender rather than a fallback.
-    """
-    cached = getattr(image, "_ocr_variants", None)
+    cached = getattr(image, "_ocr_preprocessed", None)
     if cached is not None:
         return cached
-
-    upright = correct_orientation(image)
-    gray = to_gray(upright)
-
-    cleaned = getattr(image, "_ocr_cleaned", None)
-    flattened = getattr(image, "_ocr_flattened", None)
-
-    if cleaned is None or flattened is None:
-        warped, did_warp = correct_perspective(gray)
-        base = upscale(warped if did_warp else gray)
-        flattened = remove_shadow(base)
-        cleaned = deskew(denoise(flattened))
-
-    variants = [
-        Variant("raw", Image.fromarray(gray)),
-        Variant("flat", Image.fromarray(flattened)),
-        Variant("clean", Image.fromarray(cleaned)),
-        Variant("contrast", Image.fromarray(enhance_contrast(cleaned))),
-        Variant("sauvola", Image.fromarray(binarize_sauvola(cleaned))),
-    ]
-    try:
-        image._ocr_variants = variants
-        if upright is not image:
-            upright._ocr_variants = variants
-    except AttributeError:
-        pass
-    return variants
-
-
-def preprocess_image(image: Image.Image) -> Image.Image:
-    """Single best-effort rendering.
-
-    Retained for callers that want one image rather than a variant set. Returns
-    the shadow-flattened, denoised, deskewed grayscale - deliberately NOT
-    binarised, since Tesseract 5's LSTM engine generally reads grayscale better.
-    """
-    cached_variants = getattr(image, "_ocr_variants", None)
-    if cached_variants:
-        for v in cached_variants:
-            if v.label == "clean":
-                return v.image
 
     upright = correct_orientation(image)
     gray = to_gray(upright)
     warped, did_warp = correct_perspective(gray)
     base = upscale(warped if did_warp else gray)
     flattened = remove_shadow(base)
-    cleaned = deskew(denoise(flattened))
+    cleaned = denoise(flattened)
+    result = Image.fromarray(cleaned)
 
     try:
+        image._ocr_preprocessed = result
         image._ocr_flattened = flattened
         image._ocr_cleaned = cleaned
         if upright is not image:
+            upright._ocr_preprocessed = result
             upright._ocr_flattened = flattened
             upright._ocr_cleaned = cleaned
     except AttributeError:
         pass
 
-    return Image.fromarray(cleaned)
+    return result
 

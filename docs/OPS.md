@@ -20,7 +20,7 @@
 | OCR Job Processing Time (p95) | ≤ 30s across all receipt types | MongoDB `jobs` collection timestamps | Investigate Ollama latency, detector limits, or queue depth |
 | OCR Job Processing Time (fast path) | Clean receipts complete in ~1.5s | MongoDB `jobs` collection timestamps | Review fast-path anchor scoring threshold (`FAST_PATH_ANCHOR_SCORE`) |
 | OCR Job Processing Time (cache hit) | Exact duplicate receipts complete in < 200ms | MongoDB `jobs` collection timestamps | Verify Redis `ocr:file_hash:<sha256>` hit rate |
-| OCR Pool Throughput (worker) | Escalated pool ≤ 25s per hard receipt | `scripts/benchmark.py`; worker env must set `OMP_NUM_THREADS=1`/`OMP_THREAD_LIMIT=1` | Without the OMP caps, concurrent Tesseract subprocesses thrash the CPU — measured 258-309s for a grid that runs in ~4s capped (26x penalty). Post-fix benchmark: fast-path avg 1.4s, pooled avg 13.7s, max 22.6s across the 14-receipt corpus |
+| OCR Throughput (worker) | Fallback escalation ≤ 10s per receipt | `scripts/benchmark.py` | PaddleOCR is primary; escalation runs a single-pass OpenCV + Tesseract fallback without multi-variant grid thrashing. |
 | Celery Task Success Rate | ≥ 97% (after 3 retries) | MongoDB job status field | Alert on consecutive failures; inspect worker logs |
 | Callback Delivery | 100% on completed/failed jobs | Application logs (`app.core.callback`) | Re-trigger callback manually if SERMS/PRS reports gap |
 | Composite Confidence Score | 95% of receipts score ≥ 0.75 | MongoDB `composite_confidence_score` field | Review Paddle/Tesseract cross-reference, preprocessing, or Ollama extraction quality |

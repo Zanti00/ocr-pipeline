@@ -14,7 +14,7 @@ from pathlib import Path
 import pytesseract
 from PIL import Image
 
-from app.core.ocr_engine import read_best, read_pooled, read_variant
+from app.core.ocr_engine import read_pooled, read_variant
 from app.eval.legacy import legacy_preprocess_image
 
 
@@ -44,16 +44,17 @@ def run_baseline(image_path: Path) -> OcrResult:
 
 
 def run_optimized(image_path: Path) -> OcrResult:
-    """New path: preprocessing variants x page-segmentation modes, anchor-selected."""
+    """Optimized path: PaddleOCR primary with Tesseract fallback."""
     with Image.open(image_path) as img:
-        best, _ = asyncio.run(read_best(img, lang="eng"))
+        bundle = asyncio.run(read_pooled(img, lang="eng", fast_path=True))
+        best = bundle.primary
     return OcrResult(
         label=f"optimized({best.engine}/{best.variant}/psm{best.psm})",
         text=best.text,
         confidence=best.confidence,
         anchor_score=best.score,
         engine=best.engine,
-        candidate_count=1,
+        candidate_count=len(bundle.all_readings),
     )
 
 

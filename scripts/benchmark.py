@@ -22,11 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from PIL import Image  # noqa: E402
+from PIL import Image
 
-from app.core.extraction import Extraction, extract, fast_path_sufficient  # noqa: E402
-from app.core.ocr_engine import OcrBundle, read_pooled, read_variant  # noqa: E402
-from app.core.preprocessing import build_variants  # noqa: E402
+from app.core.extraction import Extraction, extract, fast_path_sufficient
+from app.core.ocr_engine import OcrBundle, read_pooled, read_variant
+from app.core.preprocessing import preprocess_image
 
 DEFAULT_SUBSET = [
     "syn-0000-ph_nonvat_si-clean.jpg",
@@ -58,7 +58,7 @@ def run_receipt(path: Path) -> tuple[dict[str, float], OcrBundle | None, Extract
     stage = {"early_exit": False, "escalated": False, "llm_assist": 0.0}
 
     with Image.open(path) as img:
-        t_pre = _elapsed(lambda: build_variants(img))
+        t_pre = _elapsed(lambda: preprocess_image(img))
 
         async def pooled_fast():
             return await read_pooled(img, lang="eng")

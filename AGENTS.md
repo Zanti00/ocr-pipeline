@@ -96,7 +96,7 @@ Each `process_receipt_task` Celery job runs these stages in order:
 
 1. **Download & Ingest** — fetch file from `file_url` or parallel `file_urls` (multi-segment receipts up to 6); 3-zone blur verification for tall receipts
 2. **Pre-process & Strip Tiling** — OpenCV (grayscale, deskew, adaptive thresholding, denoising); tall single-image receipts (`height >= 1800` & `aspect >= 2.8`) automatically sliced into overlapping strips
-3. **OCR & Seam Stitching** — PaddleOCR extracts primary text & geometry; Tesseract runs fallback passes; middle item segments bypass pool via density-aware fast path; multi-segment/strip texts merged via seam deduplication and coordinate translation; text quality scored (`app/core/textquality.py`)
+3. **OCR & Seam Stitching** — PaddleOCR extracts primary text & geometry on upright images; single-pass OpenCV + Tesseract serves as escalation fallback; middle item segments complete via density-aware fast path; multi-segment/strip texts merged via seam deduplication and coordinate translation; text quality scored (`app/core/textquality.py`)
 4. **LLM extraction** — Ollama `qwen3:1.7b` (non-thinking JSON mode, `num_ctx=2048`) parses vendor, location, tax basis, currency, and subtotal verification (prompt bounded to top/bottom contexts on long receipts)
 5. **BIR validation** — `app/core/bir_validator.py` validates TIN format, VAT classification
 6. **Confidence scoring & Reconciliation** — `app/core/confidence.py` computes composite score (≥ 0.75 = acceptable); receipts (≥ 3 items) near-reconciled within 3% emit line items with score capped at 0.79 (`REASON_NEAR_RECONCILED`)
