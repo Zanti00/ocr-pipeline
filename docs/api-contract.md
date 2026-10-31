@@ -122,6 +122,7 @@ Sent to the provided `callback_url`.
   ]
 }
 ```
+> **Note on `items[].price`:** `price` is always emitted as the **line total** (extended amount for that item row, already accounting for `quantity`). Consumers must sum `item.price` directly rather than multiplying `item.quantity * item.price` again.
 
 ### POST `/api/duplicate-check`
 Checks for duplicate receipts.

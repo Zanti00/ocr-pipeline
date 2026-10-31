@@ -84,6 +84,7 @@ class ExtractedItem:
     price: float
     line_text: str = ""
     descriptions: list[str] = field(default_factory=list)
+    price_is_line_total: bool = False
 
     def payload(self, price: float | None = None) -> dict[str, object]:
         return {
@@ -127,7 +128,8 @@ class ItemScan:
         rows: list[dict[str, object]] = []
         for item in self.items:
             price = (
-                item.price if self.price_basis in ("line_total", "none")
+                item.price
+                if self.price_basis in ("line_total", "none") or item.price_is_line_total
                 else round(item.price * item.quantity, 2)
             )
             if price <= 0:
@@ -243,7 +245,11 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
                 qty_price_match = _QUANTITY_LINE_WITH_PRICE_RE.match(text)
                 if qty_price_match:
                     q_digits = qty_price_match.group(1).replace("I", "1").replace("l", "1")
-                    pending.quantity = max(1, int(q_digits))
+                    q_val = max(1, int(q_digits))
+                    u_val = float(qty_price_match.group(2).replace(",", "."))
+                    pending.quantity = q_val
+                    if abs(q_val * u_val - pending.price) <= 0.05:
+                        pending.price_is_line_total = True
                     continue
 
             # Check for split-line grocery format where quantity precedes price: '2 x 14.75' or '2 @ 14.75'
@@ -261,7 +267,10 @@ def _parse_region(lines: list[list[Word]], require_marker: bool) -> list[Extract
                 if pending_qty_prefix is not None:
                     q_val, u_val = pending_qty_prefix
                     pending_qty_prefix = None
-                    if abs(q_val * u_val - item.price) <= 0.05 or abs(u_val - item.price) <= 0.05:
+                    if abs(q_val * u_val - item.price) <= 0.05:
+                        item.quantity = q_val
+                        item.price_is_line_total = True
+                    elif abs(u_val - item.price) <= 0.05:
                         item.quantity = q_val
 
                 if looks_like_item_name(item.name):
@@ -349,6 +358,8 @@ def _build_item(
         elif inferred_qty is not None:
             quantity = inferred_qty
 
+    price_is_line_total = bool(inferred_qty is not None and inferred_qty == quantity)
+
     name = _clean_name(remainder)
     if not name and inferred_qty is not None:
         # Handle '2 x 14.75 29.50 V' where the name sits on the following barcode line
@@ -356,7 +367,11 @@ def _build_item(
     if not name:
         return None
     return ExtractedItem(
-        name=name, quantity=quantity, price=price, line_text=line_text or remainder
+        name=name,
+        quantity=quantity,
+        price=price,
+        line_text=line_text or remainder,
+        price_is_line_total=price_is_line_total,
     )
 
 
@@ -454,7 +469,13 @@ def reconcile_items(
 
     tolerance = max(tolerance_base, 0.01 * len(items))
     line_total = round(sum(item.price for item in items), 2)
-    unit_total = round(sum(item.price * item.quantity for item in items), 2)
+    unit_total = round(
+        sum(
+            item.price if item.price_is_line_total else item.price * item.quantity
+            for item in items
+        ),
+        2,
+    )
 
     candidates = {
         name: value for name, value in targets.items() if value is not None
@@ -494,23 +515,8 @@ def reconcile_items(
                     )
                     return scan
 
-    # Even when unreconciled, pick the price_basis that is closer to the target
-    # so unit-price receipts still multiply price * quantity in payload().
-    best_diff: float | None = None
-    best_basis = "none"
-    best_total = line_total
-    for basis, total in (("line_total", line_total), ("unit_price", unit_total)):
-        for target in candidates.values():
-            if target is not None and target > 0:
-                diff = abs(total - target)
-                if best_diff is None or diff < best_diff:
-                    best_diff = diff
-                    if basis == "unit_price" and diff < abs(line_total - target):
-                        best_basis = basis
-                        best_total = unit_total
-
-    scan.price_basis = best_basis
-    scan.total = best_total
+    scan.price_basis = "none"
+    scan.total = line_total
     scan.notes.append(
         f"items do not reconcile: line_total={line_total:.2f}, "
         f"unit_total={unit_total:.2f}, targets="
