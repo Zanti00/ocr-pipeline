@@ -37,9 +37,11 @@ class TestFieldMapping:
         # SERMS drops undeclared keys silently, so they are persisted our side.
         payload = build_callback_payload(42, FIELDS, confidence=0.91)
         transmitted = payload.model_dump()
-        # net_sales and service_charge are internal breakdown fields, not callback fields.
+        # raw net_sales and service_charge are internal keys; net_sales maps to subtotal.
         for internal in ("net_sales", "service_charge", "country"):
             assert internal not in transmitted
+        assert transmitted.get("subtotal") == 1166.07
+        assert payload.subtotal == 1166.07
 
     def test_currency_is_now_transmitted(self):
         # currency is in CALLBACK_FIELDS since the locale-propagation change.
