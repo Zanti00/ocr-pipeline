@@ -106,6 +106,7 @@ Sent to the provided `callback_url`.
   "vendor_name": "...",
   "transaction_date": "...",
   "total_amount": 100.0,
+  "subtotal": 90.0,
   "vat_amount": 10.0,
   "tin": "...",
   "invoice_number": "...",

@@ -130,6 +130,7 @@ class OcrCallbackPayload(BaseModel):
     tax_basis: Optional[str] = None
     financial_reconciliation_status: Optional[str] = None
     needs_manual_review: Optional[bool] = None
+    subtotal: Optional[float] = Field(default=None, ge=0)
 
     @field_validator("vat_classification", mode="before")
     @classmethod
@@ -172,7 +173,7 @@ class OcrCallbackPayload(BaseModel):
         data = super().model_dump(*args, **kwargs)
         # New fields are optional and omitted when unset, preserving legacy
         # callback payload shape while exposing them when the pipeline has a value.
-        for key in ("tax_basis", "financial_reconciliation_status", "needs_manual_review"):
+        for key in ("tax_basis", "financial_reconciliation_status", "needs_manual_review", "subtotal"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -205,6 +206,7 @@ def build_callback_payload(
     tax_basis: str | None = None,
     financial_reconciliation_status: str | None = None,
     needs_manual_review: bool | None = None,
+    subtotal: float | None = None,
 ) -> OcrCallbackPayload:
     """Map the internal field set onto the SERMS contract.
 
@@ -214,11 +216,15 @@ def build_callback_payload(
     transmitted and discarded.
     """
     fields_dict = fields or {}
+    resolved_subtotal = subtotal if subtotal is not None else (
+        fields_dict.get("subtotal") if fields_dict.get("subtotal") is not None else fields_dict.get("net_sales")
+    )
     return OcrCallbackPayload(
         receipt_id=receipt_id,
         vendor_name=fields_dict.get("vendor_name"),
         transaction_date=fields_dict.get("transaction_date"),
         total_amount=fields_dict.get("total_amount"),
+        subtotal=resolved_subtotal,
         vat_amount=fields_dict.get("tax_amount"),
         tin=fields_dict.get("vendor_tax_id"),
         invoice_number=fields_dict.get("invoice_number"),
